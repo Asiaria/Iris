@@ -5,7 +5,7 @@ import com.volmit.iris.core.nms.INMS;
 import com.volmit.iris.core.nms.v1X.NMSBinding1X;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
-
+import org.bukkit.plugin.PluginManager;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
 import java.io.File;
@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
 
@@ -39,7 +40,7 @@ public class ServerBootSFG {
 
     public static void BootCheck() {
         Iris.info("Checking for possible conflicts..");
-        org.bukkit.plugin.PluginManager pluginManager = Bukkit.getPluginManager();
+        PluginManager pluginManager = Bukkit.getPluginManager();
         Plugin[] plugins = pluginManager.getPlugins();
 
         incompatibilities.clear();
@@ -64,16 +65,21 @@ public class ServerBootSFG {
                 joiner.add(entry.getKey());
             }
         }
+        // Legacy ServerInfo
+        String distro = Bukkit.getName().toLowerCase();
         if (
-                !instance.getServer().getVersion().contains("Purpur") &&
-                        !instance.getServer().getVersion().contains("Paper") &&
-                        !instance.getServer().getVersion().contains("Spigot") &&
-                        !instance.getServer().getVersion().contains("Pufferfish") &&
-                        !instance.getServer().getVersion().contains("Bukkit")) {
+                !distro.contains("purpur") &&
+                        !distro.contains("paper") &&
+                        !distro.contains("spigot") &&
+                        !distro.contains("pufferfish") &&
+                        !distro.contains("bukkit")) {
+
+
             passedserversoftware = false;
             joiner.add("Server Software");
-            severityHigh++;
+            severityMedium++;
         }
+
 
         if (INMS.get() instanceof NMSBinding1X) {
             unsuportedversion = true;
@@ -81,7 +87,7 @@ public class ServerBootSFG {
             severityHigh++;
         }
 
-        if (getJavaVersion() != 17) {
+        if (!List.of(17, 21).contains(getJavaVersion())) {
             isJDK17 = false;
             joiner.add("Unsupported Java version");
             severityMedium++;
