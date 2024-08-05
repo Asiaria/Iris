@@ -18,6 +18,7 @@
 
 package com.volmit.iris.core.nms;
 
+import com.volmit.iris.core.nms.container.BiomeColor;
 import com.volmit.iris.core.nms.datapack.DataVersion;
 import com.volmit.iris.engine.framework.Engine;
 import com.volmit.iris.util.collection.KList;
@@ -38,6 +39,8 @@ import org.bukkit.entity.EntityType;
 import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.ItemStack;
+
+import java.awt.*;
 
 public interface INMSBinding {
     boolean hasTile(Location l);
@@ -112,7 +115,13 @@ public interface INMSBinding {
     
     Entity spawnEntity(Location location, EntityType type, CreatureSpawnEvent.SpawnReason reason);
 
+    Color getBiomeColor(Location location, BiomeColor type);
+
     default DataVersion getDataVersion() {
         return DataVersion.V1192;
+    }
+
+    default int getSpawnChunkCount(World world) {
+        return 441;
     }
 }

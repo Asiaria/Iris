@@ -1,5 +1,6 @@
 package com.volmit.iris.core.nms.v1_20_R4;
 
+import java.awt.Color;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -9,12 +10,15 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.Vector;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.volmit.iris.core.nms.container.BiomeColor;
 import com.volmit.iris.core.nms.datapack.DataVersion;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.item.component.CustomData;
+import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.bukkit.*;
 import org.bukkit.block.Biome;
@@ -524,6 +528,30 @@ public class NMSBinding implements INMSBinding {
         return ((CraftWorld) location.getWorld()).spawn(location, type.getEntityClass(), null, reason);
     }
 
+    @Override
+    public Color getBiomeColor(Location location, BiomeColor type) {
+        LevelReader reader = ((CraftWorld) location.getWorld()).getHandle();
+        var holder = reader.getBiome(new BlockPos(location.getBlockX(), location.getBlockY(), location.getBlockZ()));
+        var biome = holder.value();
+        if (biome == null) throw new IllegalArgumentException("Invalid biome: " + holder.unwrapKey().orElse(null));
+
+        int rgba = switch (type) {
+            case FOG -> biome.getFogColor();
+            case WATER -> biome.getWaterColor();
+            case WATER_FOG -> biome.getWaterFogColor();
+            case SKY -> biome.getSkyColor();
+            case FOLIAGE -> biome.getFoliageColor();
+            case GRASS -> biome.getGrassColor(location.getBlockX(), location.getBlockZ());
+        };
+        if (rgba == 0) {
+            if (BiomeColor.FOLIAGE == type && biome.getSpecialEffects().getFoliageColorOverride().isEmpty())
+                return null;
+            if (BiomeColor.GRASS == type && biome.getSpecialEffects().getGrassColorOverride().isEmpty())
+                return null;
+        }
+        return new Color(rgba, true);
+    }
+
     private static Field getField(Class<?> clazz, Class<?> fieldType) throws NoSuchFieldException {
         try {
             for (Field f : clazz.getDeclaredFields()) {
@@ -548,5 +576,13 @@ public class NMSBinding implements INMSBinding {
     @Override
     public DataVersion getDataVersion() {
         return DataVersion.V1205;
+    }
+
+    @Override
+    public int getSpawnChunkCount(World world) {
+        var radius = Optional.ofNullable(world.getGameRuleValue(GameRule.SPAWN_CHUNK_RADIUS))
+                .orElseGet(() -> world.getGameRuleDefault(GameRule.SPAWN_CHUNK_RADIUS));
+        if (radius == null) throw new IllegalStateException("GameRule.SPAWN_CHUNK_RADIUS is null!");
+        return (int) Math.pow(2 * radius + 1, 2);
     }
 }
