@@ -22,6 +22,7 @@ import com.volmit.iris.Iris;
 import com.volmit.iris.core.loader.IrisRegistrant;
 import com.volmit.iris.engine.data.cache.AtomicCache;
 import com.volmit.iris.engine.object.annotations.*;
+import com.volmit.iris.engine.object.annotations.functions.StructureKeyFunction;
 import com.volmit.iris.util.collection.KList;
 import com.volmit.iris.util.json.JSONObject;
 import com.volmit.iris.util.plugin.VolmitSender;
@@ -68,6 +69,13 @@ public class IrisJigsawStructure extends IrisRegistrant {
 
     @Desc("Set to true to prevent rotating the initial structure piece")
     private boolean disableInitialRotation = false;
+
+    @RegistryListFunction(StructureKeyFunction.class)
+    @Desc("The minecraft key to use when creating treasure maps")
+    private String structureKey = null;
+
+    @Desc("Force Place the whole structure")
+    private boolean forcePlace = false;
 
     private transient AtomicCache<Integer> maxDimension = new AtomicCache<>();
 
@@ -131,13 +139,21 @@ public class IrisJigsawStructure extends IrisRegistrant {
                     loadPiece(i, pools, pieces);
                 }
 
+                if (pieces.isEmpty()) {
+                    int max = 0;
+                    for (String i : getPieces()) {
+                        max = Math.max(max, getLoader().getJigsawPieceLoader().load(i).getMax2dDimension());
+                    }
+                    return max;
+                }
+
                 int avg = 0;
 
                 for (String i : pieces) {
                     avg += getLoader().getJigsawPieceLoader().load(i).getMax2dDimension();
                 }
 
-                return (avg / (pieces.size() > 0 ? pieces.size() : 1)) * (((getMaxDepth() + 1) * 2) + 1);
+                return (avg / (!pieces.isEmpty() ? pieces.size() : 1)) * (((getMaxDepth() + 1) * 2) + 1);
             }
         });
     }

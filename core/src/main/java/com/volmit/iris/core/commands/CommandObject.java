@@ -24,9 +24,11 @@ import com.volmit.iris.core.loader.IrisData;
 import com.volmit.iris.core.service.ObjectSVC;
 import com.volmit.iris.core.service.StudioSVC;
 import com.volmit.iris.core.service.WandSVC;
+import com.volmit.iris.core.tools.IrisConverter;
 import com.volmit.iris.engine.framework.Engine;
 import com.volmit.iris.engine.object.*;
 import com.volmit.iris.util.data.Cuboid;
+import com.volmit.iris.util.data.registry.Materials;
 import com.volmit.iris.util.decree.DecreeExecutor;
 import com.volmit.iris.util.decree.DecreeOrigin;
 import com.volmit.iris.util.decree.annotations.Decree;
@@ -35,12 +37,9 @@ import com.volmit.iris.util.decree.specialhandlers.ObjectHandler;
 import com.volmit.iris.util.format.C;
 import com.volmit.iris.util.math.Direction;
 import com.volmit.iris.util.math.RNG;
-import com.volmit.iris.util.misc.E;
 import com.volmit.iris.util.scheduling.Queue;
 import org.bukkit.*;
 import org.bukkit.block.Block;
-import org.bukkit.block.BlockState;
-import org.bukkit.block.TileState;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.Vector;
@@ -53,7 +52,7 @@ import java.util.*;
 @Decree(name = "object", aliases = "o", origin = DecreeOrigin.PLAYER, studio = true, description = "Iris object manipulation")
 public class CommandObject implements DecreeExecutor {
 
-    private static final Set<Material> skipBlocks = Set.of(E.getOrDefault(Material.class, "GRASS", "SHORT_GRASS"), Material.SNOW, Material.VINE, Material.TORCH, Material.DEAD_BUSH,
+    private static final Set<Material> skipBlocks = Set.of(Materials.GRASS, Material.SNOW, Material.VINE, Material.TORCH, Material.DEAD_BUSH,
             Material.POPPY, Material.DANDELION);
 
     public static IObjectPlacer createPlacer(World world, Map<Block, BlockData> futureBlockChanges) {
@@ -117,10 +116,8 @@ public class CommandObject implements DecreeExecutor {
             }
 
             @Override
-            public void setTile(int xx, int yy, int zz, TileData<? extends TileState> tile) {
-                BlockState state = world.getBlockAt(xx, yy, zz).getState();
-                tile.toBukkitTry(state);
-                state.update();
+            public void setTile(int xx, int yy, int zz, TileData tile) {
+                tile.toBukkitTry(world.getBlockAt(xx, yy, zz));
             }
 
             @Override
@@ -210,6 +207,16 @@ public class CommandObject implements DecreeExecutor {
             sender().sendMessage("Failed to save object " + o.getLoadFile() + ": " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    @Decree(description = "Convert .schem files in the 'convert' folder to .iob files.")
+    public void convert () {
+        try {
+            IrisConverter.convertSchematics(sender());
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
     }
 
     @Decree(description = "Get a powder that reveals objects", studio = true, aliases = "d")
@@ -367,9 +374,11 @@ public class CommandObject implements DecreeExecutor {
             @Param(description = "The file to store it in, can use / for subfolders")
             String name,
             @Param(description = "Overwrite existing object files", defaultValue = "false", aliases = "force")
-            boolean overwrite
+            boolean overwrite,
+            @Param(description = "Use legacy TileState serialization if possible", defaultValue = "true")
+            boolean legacy
     ) {
-        IrisObject o = WandSVC.createSchematic(player());
+        IrisObject o = WandSVC.createSchematic(player(), legacy);
 
         if (o == null) {
             sender().sendMessage(C.YELLOW + "You need to hold your wand!");
@@ -383,7 +392,7 @@ public class CommandObject implements DecreeExecutor {
             return;
         }
         try {
-            o.write(file);
+            o.write(file, sender());
         } catch (IOException e) {
             sender().sendMessage(C.RED + "Failed to save object because of an IOException: " + e.getMessage());
             Iris.reportError(e);

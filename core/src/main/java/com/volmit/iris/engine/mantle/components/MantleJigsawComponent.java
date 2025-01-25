@@ -34,15 +34,18 @@ import com.volmit.iris.util.math.Position2;
 import com.volmit.iris.util.math.RNG;
 import com.volmit.iris.util.matter.slices.container.JigsawStructuresContainer;
 import com.volmit.iris.util.noise.CNG;
+import lombok.Getter;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
 
 public class MantleJigsawComponent extends IrisMantleComponent {
+    @Getter
+    private final int radius = computeRadius();
     private final CNG cng;
 
     public MantleJigsawComponent(EngineMantle engineMantle) {
-        super(engineMantle, MantleFlag.JIGSAW);
+        super(engineMantle, MantleFlag.JIGSAW, 1);
         cng = NoiseStyle.STATIC.create(new RNG(jigsaw()));
     }
 
@@ -57,7 +60,7 @@ public class MantleJigsawComponent extends IrisMantleComponent {
 
     @ChunkCoordinates
     private void generateJigsaw(MantleWriter writer, int x, int z, IrisBiome biome, IrisRegion region) {
-        long seed = cng.fit(Integer.MIN_VALUE, Integer.MIN_VALUE, x, z);
+        long seed = cng.fit(Integer.MIN_VALUE, Integer.MAX_VALUE, x, z);
 
         if (getDimension().getStronghold() != null) {
             List<Position2> poss = getDimension().getStrongholds(seed());
@@ -66,7 +69,7 @@ public class MantleJigsawComponent extends IrisMantleComponent {
                 for (Position2 pos : poss) {
                     if (x == pos.getX() >> 4 && z == pos.getZ() >> 4) {
                         IrisJigsawStructure structure = getData().getJigsawStructureLoader().load(getDimension().getStronghold());
-                        place(writer, pos.toIris(), structure, new RNG(seed));
+                        place(writer, pos.toIris(), structure, new RNG(seed), true);
                         return;
                     }
                 }
@@ -92,7 +95,7 @@ public class MantleJigsawComponent extends IrisMantleComponent {
         RNG rng = new RNG(seed);
         IrisPosition position = new IrisPosition((x << 4) + rng.nextInt(15), 0, (z << 4) + rng.nextInt(15));
         IrisJigsawStructure structure = getData().getJigsawStructureLoader().load(i.getStructure());
-        return place(writer, position, structure, rng);
+        return place(writer, position, structure, rng, false);
     }
 
     @ChunkCoordinates
@@ -130,7 +133,7 @@ public class MantleJigsawComponent extends IrisMantleComponent {
     public IrisJigsawStructure guess(int x, int z) {
         // todo The guess doesnt bring into account that the placer may return -1
         // todo doesnt bring skipped placements into account
-        long seed = cng.fit(Integer.MIN_VALUE, Integer.MIN_VALUE, x, z);
+        long seed = cng.fit(Integer.MIN_VALUE, Integer.MAX_VALUE, x, z);
         IrisBiome biome = getEngineMantle().getEngine().getSurfaceBiome((x << 4) + 8, (z << 4) + 8);
         IrisRegion region = getEngineMantle().getEngine().getRegion((x << 4) + 8, (z << 4) + 8);
 
@@ -161,11 +164,36 @@ public class MantleJigsawComponent extends IrisMantleComponent {
     }
 
     @BlockCoordinates
-    private boolean place(MantleWriter writer, IrisPosition position, IrisJigsawStructure structure, RNG rng) {
-        return new PlannedStructure(structure, position, rng).place(writer, getMantle(), writer.getEngine());
+    private boolean place(MantleWriter writer, IrisPosition position, IrisJigsawStructure structure, RNG rng, boolean forcePlace) {
+        return new PlannedStructure(structure, position, rng, forcePlace).place(writer, getMantle(), writer.getEngine());
     }
 
     private long jigsaw() {
         return getEngineMantle().getEngine().getSeedManager().getJigsaw();
+    }
+
+    private int computeRadius() {
+        var dimension = getDimension();
+
+        KSet<String> structures = new KSet<>();
+        for (var placement : dimension.getJigsawStructures()) {
+            structures.add(placement.getStructure());
+        }
+        for (var region : dimension.getAllRegions(this::getData)) {
+            for (var placement : region.getJigsawStructures()) {
+                structures.add(placement.getStructure());
+            }
+        }
+        for (var biome : dimension.getAllBiomes(this::getData)) {
+            for (var placement : biome.getJigsawStructures()) {
+                structures.add(placement.getStructure());
+            }
+        }
+
+        int max = 0;
+        for (var structure : structures) {
+            max = Math.max(max, getData().getJigsawStructureLoader().load(structure).getMaxDimension());
+        }
+        return max;
     }
 }

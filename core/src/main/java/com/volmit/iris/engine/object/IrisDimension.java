@@ -21,6 +21,7 @@ package com.volmit.iris.engine.object;
 import com.volmit.iris.Iris;
 import com.volmit.iris.core.loader.IrisData;
 import com.volmit.iris.core.loader.IrisRegistrant;
+import com.volmit.iris.core.nms.INMS;
 import com.volmit.iris.core.nms.datapack.IDataFixer;
 import com.volmit.iris.engine.data.cache.AtomicCache;
 import com.volmit.iris.engine.object.annotations.*;
@@ -233,8 +234,6 @@ public class IrisDimension extends IrisRegistrant {
     private IrisRange dimensionHeightEnd = new IrisRange(-64, 320);
     @Desc("Define the min and max Y bounds of this dimension. Please keep in mind that Iris internally generates from 0 to (max - min). \n\nFor example at -64 to 320, Iris is internally generating to 0 to 384, then on outputting chunks, it shifts it down by the min height (64 blocks). The default is -64 to 320. \n\nThe fluid height is placed at (fluid height + min height). So a fluid height of 63 would actually show up in the world at 1.")
     private IrisRange dimensionHeightNether = new IrisRange(-64, 320);
-    @Desc("Enable smart vanilla height")
-    private boolean smartVanillaHeight = false;
     @RegistryListResource(IrisBiome.class)
     @Desc("Keep this either undefined or empty. Setting any biome name into this will force iris to only generate the specified biome. Great for testing.")
     private String focus = "";
@@ -300,10 +299,8 @@ public class IrisDimension extends IrisRegistrant {
     private IrisMaterialPalette rockPalette = new IrisMaterialPalette().qclear().qadd("stone");
     @Desc("The palette of blocks for 'water'")
     private IrisMaterialPalette fluidPalette = new IrisMaterialPalette().qclear().qadd("water");
-    @Desc("Remove cartographers so they do not crash the server (Iris worlds only)")
-    private boolean removeCartographersDueToCrash = true;
-    @Desc("Notify players of cancelled cartographer villager in this radius in blocks (set to -1 to disable, -2 for everyone)")
-    private int notifyPlayersOfCartographerCancelledRadius = 30;
+    @Desc("Prevent cartographers to generate explorer maps (Iris worlds only)\nONLY TOUCH IF YOUR SERVER CRASHES WHILE GENERATING EXPLORER MAPS")
+    private boolean disableExplorerMaps = false;
     @Desc("Collection of ores to be generated")
     @ArrayType(type = IrisOreGenerator.class, min = 1)
     private KList<IrisOreGenerator> ores = new KList<>();
@@ -489,10 +486,10 @@ public class IrisDimension extends IrisRegistrant {
                         {
                             "pack": {
                                 "description": "Iris Data Pack. This pack contains all installed Iris Packs' resources.",
-                                "pack_format": 10
+                                "pack_format": {}
                             }
                         }
-                        """);
+                        """.replace("{}", INMS.get().getDataVersion().getPackFormat() + ""));
             } catch (IOException e) {
                 Iris.reportError(e);
                 e.printStackTrace();
