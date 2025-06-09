@@ -32,9 +32,9 @@ import com.volmit.iris.core.nms.v1X.NMSBinding1X;
 import com.volmit.iris.core.pregenerator.LazyPregenerator;
 import com.volmit.iris.core.service.StudioSVC;
 import com.volmit.iris.core.tools.IrisToolbelt;
-import com.volmit.iris.core.tools.IrisWorldCreator;
 import com.volmit.iris.engine.EnginePanic;
 import com.volmit.iris.engine.object.IrisCompat;
+import com.volmit.iris.engine.object.IrisContextInjector;
 import com.volmit.iris.engine.object.IrisDimension;
 import com.volmit.iris.engine.object.IrisWorld;
 import com.volmit.iris.engine.platform.BukkitChunkGenerator;
@@ -63,7 +63,10 @@ import com.volmit.iris.util.reflect.ShadeFix;
 import com.volmit.iris.util.scheduling.J;
 import com.volmit.iris.util.scheduling.Queue;
 import com.volmit.iris.util.scheduling.ShurikenQueue;
+import com.volmit.iris.util.sentry.Attachments;
+import com.volmit.iris.util.sentry.IrisLogger;
 import io.papermc.lib.PaperLib;
+import io.sentry.Sentry;
 import net.kyori.adventure.platform.bukkit.BukkitAudiences;
 import net.kyori.adventure.text.serializer.ComponentSerializer;
 import org.bstats.bukkit.Metrics;
@@ -102,8 +105,6 @@ import static com.volmit.iris.core.safeguard.ServerBootSFG.passedserversoftware;
 
 @SuppressWarnings("CanBeFinal")
 public class Iris extends VolmitPlugin implements Listener {
-    public static final String OVERWORLD_TAG = "31010";
-
     private static final Queue<Runnable> syncJobs = new ShurikenQueue<>();
 
     public static Iris instance;
@@ -393,6 +394,7 @@ public class Iris extends VolmitPlugin implements Listener {
     }
 
     public static void reportError(Throwable e) {
+        Sentry.captureException(e);
         if (IrisSettings.get().getGeneral().isDebug()) {
             String n = e.getClass().getCanonicalName() + "-" + e.getStackTrace()[0].getClassName() + "-" + e.getStackTrace()[0].getLineNumber();
 
@@ -457,12 +459,16 @@ public class Iris extends VolmitPlugin implements Listener {
         instance = this;
         services = new KMap<>();
         setupAudience();
+        setupSentry();
         initialize("com.volmit.iris.core.service").forEach((i) -> services.put((Class<? extends IrisService>) i.getClass(), (IrisService) i));
         INMS.get();
         IO.delete(new File("iris"));
+        compat = IrisCompat.configured(getDataFile("compat.json"));
+        ServerConfigurator.configure();
+        new IrisContextInjector();
         IrisSafeguard.IrisSafeguardSystem();
         getSender().setTag(getTag());
-        compat = IrisCompat.configured(getDataFile("compat.json"));
+        IrisSafeguard.earlySplash();
         linkMultiverseCore = new MultiverseCoreLink();
         linkMythicMobs = new MythicMobsLink();
         configWatcher = new FileWatcher(getDataFile("settings.json"));
@@ -517,15 +523,15 @@ public class Iris extends VolmitPlugin implements Listener {
                 Iris.info("Loading World: %s | Generator: %s", s, generator);
 
                 Iris.info(C.LIGHT_PURPLE + "Preparing Spawn for " + s + "' using Iris:" + generator + "...");
-                new WorldCreator(s)
-                        .type(IrisWorldCreator.IRIS)
+                WorldCreator c = new WorldCreator(s)
                         .generator(getDefaultWorldGenerator(s, generator))
-                        .environment(IrisData.loadAnyDimension(generator).getEnvironment())
-                        .createWorld();
+                        .environment(IrisData.loadAnyDimension(generator).getEnvironment());
+                INMS.get().createWorld(c);
                 Iris.info(C.LIGHT_PURPLE + "Loaded " + s + "!");
             }
         } catch (Throwable e) {
             e.printStackTrace();
+            reportError(e);
         }
     }
 
@@ -543,7 +549,7 @@ public class Iris extends VolmitPlugin implements Listener {
                     });
                 });
             } catch (IrisException e) {
-                e.printStackTrace();
+                reportError(e);
             }
         }
     }
@@ -575,9 +581,19 @@ public class Iris extends VolmitPlugin implements Listener {
         Bukkit.getScheduler().cancelTasks(this);
         HandlerList.unregisterAll((Plugin) this);
         postShutdown.forEach(Runnable::run);
-        services.clear();
-        MultiBurst.burst.close();
         super.onDisable();
+
+        J.attempt(new JarScanner(instance.getJarFile(), "", false)::scan);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            Bukkit.getWorlds()
+                    .stream()
+                    .map(IrisToolbelt::access)
+                    .filter(Objects::nonNull)
+                    .forEach(PlatformChunkGenerator::close);
+
+            MultiBurst.burst.close();
+            services.clear();
+        }));
     }
 
     private void setupPapi() {
@@ -623,12 +639,22 @@ public class Iris extends VolmitPlugin implements Listener {
             Iris.warn("=");
             Iris.warn("============================================");
         }
-        if (!instance.getServer().getVersion().contains("Purpur")) {
-            passed = false;
+
+        try {
+            Class.forName("io.papermc.paper.configuration.PaperConfigurations");
+        } catch (ClassNotFoundException e) {
+            Iris.info(C.RED + "Iris requires paper or above to function properly..");
+            return false;
+        }
+
+        try {
+            Class.forName("org.purpurmc.purpur.PurpurConfig");
+        } catch (ClassNotFoundException e) {
             Iris.info("We recommend using Purpur for the best experience with Iris.");
             Iris.info("Purpur is a fork of Paper that is optimized for performance and stability.");
             Iris.info("Plugins that work on Spigot / Paper work on Purpur.");
             Iris.info("You can download it here: https://purpurmc.org");
+            return false;
         }
         return passed;
     }
@@ -853,13 +879,6 @@ public class Iris extends VolmitPlugin implements Listener {
             Iris.info("Server type & version: " + C.RED + Bukkit.getVersion());
         } else { Iris.info("Server type & version: " + Bukkit.getVersion()); }
         Iris.info("Java: " + getJava());
-        if (!instance.getServer().getVersion().contains("Purpur")) {
-            if (instance.getServer().getVersion().contains("Spigot") && instance.getServer().getVersion().contains("Bukkit")) {
-                 Iris.info(C.RED + " Iris requires paper or above to function properly..");
-            } else {
-                Iris.info(C.YELLOW + "Purpur is recommended to use with iris.");
-            }
-        }
         if (getHardware.getProcessMemory() < 5999) {
             Iris.warn("6GB+ Ram is recommended");
             Iris.warn("Process Memory: " + getHardware.getProcessMemory() + " MB");
@@ -925,5 +944,34 @@ public class Iris extends VolmitPlugin implements Listener {
         } catch (Exception e) {
             return -1;
         }
+    }
+
+    private static void setupSentry() {
+        var settings = IrisSettings.get().getSentry();
+        if (settings.disableAutoReporting || Sentry.isEnabled()) return;
+        Iris.info("Enabling Sentry for anonymous error reporting. You can disable this in the settings.");
+        Sentry.init(options -> {
+            options.setDsn("https://b16ecc222e9c1e0c48faecacb906fd89@o4509451052646400.ingest.de.sentry.io/4509452722765904");
+            if (settings.debug) {
+                options.setLogger(new IrisLogger());
+                options.setDebug(true);
+            }
+
+            options.setAttachServerName(false);
+            options.setEnableUncaughtExceptionHandler(false);
+            options.setRelease(Iris.instance.getDescription().getVersion());
+            options.setBeforeSend((event, hint) -> {
+                event.setTag("iris.safeguard", IrisSafeguard.mode());
+                event.setTag("iris.nms", INMS.get().getClass().getCanonicalName());
+                return event;
+            });
+        });
+        Sentry.configureScope(scope -> {
+            scope.addAttachment(Attachments.PLUGINS);
+            scope.setTag("server", Bukkit.getVersion());
+            scope.setTag("server.type", Bukkit.getName());
+            scope.setTag("server.api", Bukkit.getBukkitVersion());
+        });
+        Runtime.getRuntime().addShutdownHook(new Thread(Sentry::close));
     }
 }

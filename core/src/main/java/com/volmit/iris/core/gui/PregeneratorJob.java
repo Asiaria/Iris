@@ -24,7 +24,6 @@ import com.volmit.iris.core.pregenerator.IrisPregenerator;
 import com.volmit.iris.core.pregenerator.PregenListener;
 import com.volmit.iris.core.pregenerator.PregenTask;
 import com.volmit.iris.core.pregenerator.PregeneratorMethod;
-import com.volmit.iris.core.tools.IrisPackBenchmarking;
 import com.volmit.iris.engine.framework.Engine;
 import com.volmit.iris.util.collection.KList;
 import com.volmit.iris.util.format.Form;
@@ -41,11 +40,12 @@ import java.awt.*;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
 import java.awt.image.BufferedImage;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
-
-import static com.volmit.iris.core.tools.IrisPackBenchmarking.benchmarkInProgress;
 
 public class PregeneratorJob implements PregenListener {
     private static final Color COLOR_EXISTS = parseColor("#4d7d5b");
@@ -56,7 +56,7 @@ public class PregeneratorJob implements PregenListener {
     private static final Color COLOR_NETWORK_GENERATING = parseColor("#836b8c");
     private static final Color COLOR_GENERATED = parseColor("#65c295");
     private static final Color COLOR_CLEANED = parseColor("#34eb93");
-    public static PregeneratorJob instance;
+    private static final AtomicReference<PregeneratorJob> instance = new AtomicReference<>();
     private final MemoryMonitor monitor;
     private final PregenTask task;
     private final boolean saving;
@@ -67,26 +67,33 @@ public class PregeneratorJob implements PregenListener {
     private final Position2 max;
     private final ChronoLatch cl = new ChronoLatch(TimeUnit.MINUTES.toMillis(1));
     private final Engine engine;
+    private final ExecutorService service;
     private JFrame frame;
     private PregenRenderer renderer;
     private int rgc = 0;
     private String[] info;
 
     public PregeneratorJob(PregenTask task, PregeneratorMethod method, Engine engine) {
+        instance.updateAndGet(old -> {
+            if (old != null) {
+                old.pregenerator.close();
+                old.close();
+            }
+            return this;
+        });
         this.engine = engine;
-        instance = this;
         monitor = new MemoryMonitor(50);
         saving = false;
         info = new String[]{"Initializing..."};
         this.task = task;
         this.pregenerator = new IrisPregenerator(task, method, this);
         max = new Position2(0, 0);
-        min = new Position2(0, 0);
-        task.iterateRegions((xx, zz) -> {
-            min.setX(Math.min(xx << 5, min.getX()));
-            min.setZ(Math.min(zz << 5, min.getZ()));
-            max.setX(Math.max((xx << 5) + 31, max.getX()));
-            max.setZ(Math.max((zz << 5) + 31, max.getZ()));
+        min = new Position2(Integer.MAX_VALUE, Integer.MAX_VALUE);
+        task.iterateAllChunks((xx, zz) -> {
+            min.setX(Math.min(xx, min.getX()));
+            min.setZ(Math.min(zz, min.getZ()));
+            max.setX(Math.max(xx, max.getX()));
+            max.setZ(Math.max(zz, max.getZ()));
         });
 
         if (IrisSettings.get().getGui().isUseServerLaunchedGuis() && task.isGui()) {
@@ -99,40 +106,44 @@ public class PregeneratorJob implements PregenListener {
         }, "Iris Pregenerator");
         t.setPriority(Thread.MIN_PRIORITY);
         t.start();
+        service = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     public static boolean shutdownInstance() {
-        if (instance == null) {
+        PregeneratorJob inst = instance.get();
+        if (inst == null) {
             return false;
         }
 
-        J.a(() -> instance.pregenerator.close());
+        J.a(inst.pregenerator::close);
         return true;
     }
 
     public static PregeneratorJob getInstance() {
-        return instance;
+        return instance.get();
     }
 
     public static boolean pauseResume() {
-        if (instance == null) {
+        PregeneratorJob inst = instance.get();
+        if (inst == null) {
             return false;
         }
 
         if (isPaused()) {
-            instance.pregenerator.resume();
+            inst.pregenerator.resume();
         } else {
-            instance.pregenerator.pause();
+            inst.pregenerator.pause();
         }
         return true;
     }
 
     public static boolean isPaused() {
-        if (instance == null) {
+        PregeneratorJob inst = instance.get();
+        if (inst == null) {
             return true;
         }
 
-        return instance.paused();
+        return inst.paused();
     }
 
     private static Color parseColor(String c) {
@@ -162,7 +173,7 @@ public class PregeneratorJob implements PregenListener {
     }
 
     public void drawRegion(int x, int z, Color color) {
-        J.a(() -> PregenTask.iterateRegion(x, z, (xx, zz) -> {
+        J.a(() -> task.iterateChunks(x, z, (xx, zz) -> {
             draw(xx, zz, color);
             J.sleep(3);
         }));
@@ -182,7 +193,7 @@ public class PregeneratorJob implements PregenListener {
         J.a(() -> {
             pregenerator.close();
             close();
-            instance = null;
+            instance.compareAndSet(this, null);
         });
     }
 
@@ -222,10 +233,10 @@ public class PregeneratorJob implements PregenListener {
     }
 
     @Override
-    public void onTick(double chunksPerSecond, double chunksPerMinute, double regionsPerMinute, double percent, int generated, int totalChunks, int chunksRemaining, long eta, long elapsed, String method) {
+    public void onTick(double chunksPerSecond, double chunksPerMinute, double regionsPerMinute, double percent, long generated, long totalChunks, long chunksRemaining, long eta, long elapsed, String method, boolean cached) {
         info = new String[]{
                 (paused() ? "PAUSED" : (saving ? "Saving... " : "Generating")) + " " + Form.f(generated) + " of " + Form.f(totalChunks) + " (" + Form.pc(percent, 0) + " Complete)",
-                "Speed: " + Form.f(chunksPerSecond, 0) + " Chunks/s, " + Form.f(regionsPerMinute, 1) + " Regions/m, " + Form.f(chunksPerMinute, 0) + " Chunks/m",
+                "Speed: " + (cached ? "Cached " : "") + Form.f(chunksPerSecond, 0) + " Chunks/s, " + Form.f(regionsPerMinute, 1) + " Regions/m, " + Form.f(chunksPerMinute, 0) + " Chunks/m",
                 Form.duration(eta, 2) + " Remaining " + " (" + Form.duration(elapsed, 2) + " Elapsed)",
                 "Generation Method: " + method,
                 "Memory: " + Form.memSize(monitor.getUsedBytes(), 2) + " (" + Form.pc(monitor.getUsagePercent(), 0) + ") Pressure: " + Form.memSize(monitor.getPressure(), 0) + "/s",
@@ -243,13 +254,16 @@ public class PregeneratorJob implements PregenListener {
     }
 
     @Override
-    public void onChunkGenerated(int x, int z) {
-        if (engine != null) {
-            draw(x, z, engine.draw((x << 4) + 8, (z << 4) + 8));
-            return;
-        }
+    public void onChunkGenerated(int x, int z, boolean cached) {
+        if (renderer == null || frame == null || !frame.isVisible()) return;
+        service.submit(() -> {
+            if (engine != null) {
+                draw(x, z, engine.draw((x << 4) + 8, (z << 4) + 8));
+                return;
+            }
 
-        draw(x, z, COLOR_GENERATED);
+            draw(x, z, COLOR_GENERATED);
+        });
     }
 
     @Override
@@ -307,8 +321,9 @@ public class PregeneratorJob implements PregenListener {
     @Override
     public void onClose() {
         close();
-        instance = null;
+        instance.compareAndSet(this, null);
         whenDone.forEach(Runnable::run);
+        service.shutdownNow();
     }
 
     @Override

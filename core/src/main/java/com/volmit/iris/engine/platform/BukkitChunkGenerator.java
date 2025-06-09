@@ -21,6 +21,7 @@ package com.volmit.iris.engine.platform;
 import com.volmit.iris.Iris;
 import com.volmit.iris.core.loader.IrisData;
 import com.volmit.iris.core.nms.INMS;
+import com.volmit.iris.core.nms.container.AutoClosing;
 import com.volmit.iris.core.service.StudioSVC;
 import com.volmit.iris.engine.IrisEngine;
 import com.volmit.iris.engine.data.chunk.TerrainChunk;
@@ -39,6 +40,7 @@ import com.volmit.iris.util.io.ReactiveFolder;
 import com.volmit.iris.util.scheduling.ChronoLatch;
 import com.volmit.iris.util.scheduling.J;
 import com.volmit.iris.util.scheduling.Looper;
+import io.papermc.lib.PaperLib;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.Setter;
@@ -48,6 +50,7 @@ import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.world.WorldInitEvent;
 import org.bukkit.generator.BiomeProvider;
@@ -84,12 +87,12 @@ public class BukkitChunkGenerator extends ChunkGenerator implements PlatformChun
     private final boolean studio;
     private final AtomicInteger a = new AtomicInteger(0);
     private final CompletableFuture<Integer> spawnChunks = new CompletableFuture<>();
-    private Engine engine;
-    private Looper hotloader;
-    private StudioMode lastMode;
-    private DummyBiomeProvider dummyBiomeProvider;
+    private volatile Engine engine;
+    private volatile Looper hotloader;
+    private volatile StudioMode lastMode;
+    private volatile DummyBiomeProvider dummyBiomeProvider;
     @Setter
-    private StudioGenerator studioGenerator;
+    private volatile StudioGenerator studioGenerator;
 
     private boolean initialized = false;
 
@@ -108,25 +111,13 @@ public class BukkitChunkGenerator extends ChunkGenerator implements PlatformChun
         Bukkit.getServer().getPluginManager().registerEvents(this, Iris.instance);
     }
 
-    private static Field getField(Class clazz, String fieldName)
-            throws NoSuchFieldException {
-        try {
-            return clazz.getDeclaredField(fieldName);
-        } catch (NoSuchFieldException e) {
-            Class superClass = clazz.getSuperclass();
-            if (superClass == null) {
-                throw e;
-            } else {
-                return getField(superClass, fieldName);
-            }
-        }
-    }
-
-    @EventHandler
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onWorldInit(WorldInitEvent event) {
         try {
             if (initialized || !world.name().equals(event.getWorld().getName()))
                 return;
+            AutoClosing.closeContext();
+            INMS.get().removeCustomDimensions(event.getWorld());
             world.setRawWorldSeed(event.getWorld().getSeed());
             Engine engine = getEngine(event.getWorld());
             if (engine == null) {
@@ -152,6 +143,20 @@ public class BukkitChunkGenerator extends ChunkGenerator implements PlatformChun
         } catch (Throwable e) {
             e.printStackTrace();
         }
+    }
+
+    @Nullable
+    @Override
+    public Location getFixedSpawnLocation(@NotNull World world, @NotNull Random random) {
+        Location location = new Location(world, 0, 64, 0);
+        PaperLib.getChunkAtAsync(location)
+                .thenAccept(c -> {
+                    World w = c.getWorld();
+                    if (!w.getSpawnLocation().equals(location))
+                        return;
+                    w.setSpawnLocation(location.add(0, w.getHighestBlockYAt(location) - 64, 0));
+                });
+        return location;
     }
 
     private void setupEngine() {
@@ -297,7 +302,9 @@ public class BukkitChunkGenerator extends ChunkGenerator implements PlatformChun
                 hotloader.interrupt();
             }
 
-            getEngine().close();
+            final Engine engine = getEngine();
+            if (engine != null && !engine.isClosed())
+                engine.close();
             folder.clear();
             populators.clear();
 

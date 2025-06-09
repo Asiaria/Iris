@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class ChunkUpdater {
+    private static final String REGION_PATH = "region" + File.separator + "r.";
     private final AtomicBoolean paused = new AtomicBoolean();
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private final KMap<Long, Pair<Long, AtomicInteger>> lastUse = new KMap<>();
@@ -108,6 +109,7 @@ public class ChunkUpdater {
                         }
                     }
                 } catch (Exception e) {
+                    Iris.reportError(e);
                     e.printStackTrace();
                 }
             }, 0, 3, TimeUnit.SECONDS);
@@ -162,11 +164,14 @@ public class ChunkUpdater {
                 J.sleep(50);
             }
 
-            if (rX < dimensions.min.getX() || rX > dimensions.max.getX() || rZ < dimensions.min.getZ() || rZ > dimensions.max.getZ()) {
-                return;
-            }
+            if (rX < dimensions.min.getX() ||
+                    rX > dimensions.max.getX() ||
+                    rZ < dimensions.min.getZ() ||
+                    rZ > dimensions.max.getZ() ||
+                    !new File(world.getWorldFolder(), REGION_PATH + rX + "." + rZ + ".mca").exists()
+            ) return;
 
-            PregenTask.iterateRegion(rX, rZ, (x, z) -> {
+            task.iterateChunks(rX, rZ, (x, z) -> {
                 while (paused.get() && !cancelled.get()) {
                     J.sleep(50);
                 }
@@ -310,6 +315,7 @@ public class ChunkUpdater {
                 world.save();
             }).get();
         } catch (Throwable e) {
+            Iris.reportError(e);
             e.printStackTrace();
         }
     }
@@ -348,8 +354,8 @@ public class ChunkUpdater {
         int width = maxZ - minZ + 1;
 
         return new Dimensions(new Position2(minX, minZ), new Position2(maxX, maxZ), height * width, PregenTask.builder()
-                .width((int) Math.ceil(width / 2d))
-                .height((int) Math.ceil(height / 2d))
+                .radiusZ((int) Math.ceil(width / 2d * 512))
+                .radiusX((int) Math.ceil(height / 2d * 512))
                 .center(new Position2(oX, oZ))
                 .build());
     }

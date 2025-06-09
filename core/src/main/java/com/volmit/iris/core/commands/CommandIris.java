@@ -21,9 +21,9 @@ package com.volmit.iris.core.commands;
 import com.volmit.iris.Iris;
 import com.volmit.iris.core.IrisSettings;
 import com.volmit.iris.core.loader.IrisData;
+import com.volmit.iris.core.nms.INMS;
 import com.volmit.iris.core.pregenerator.ChunkUpdater;
 import com.volmit.iris.core.service.StudioSVC;
-import com.volmit.iris.core.tools.IrisBenchmarking;
 import com.volmit.iris.core.tools.IrisToolbelt;
 import com.volmit.iris.engine.framework.Engine;
 import com.volmit.iris.engine.object.IrisDimension;
@@ -58,7 +58,6 @@ import java.util.List;
 
 import static com.volmit.iris.Iris.service;
 import static com.volmit.iris.core.service.EditSVC.deletingWorld;
-import static com.volmit.iris.core.tools.IrisBenchmarking.inProgress;
 import static com.volmit.iris.core.safeguard.IrisSafeguard.unstablemode;
 import static com.volmit.iris.core.safeguard.ServerBootSFG.incompatibilities;
 import static org.bukkit.Bukkit.getServer;
@@ -67,14 +66,12 @@ import static org.bukkit.Bukkit.getServer;
 public class CommandIris implements DecreeExecutor {
     private CommandStudio studio;
     private CommandPregen pregen;
-    private CommandLazyPregen lazyPregen;
     private CommandSettings settings;
     private CommandObject object;
     private CommandJigsaw jigsaw;
     private CommandWhat what;
     private CommandEdit edit;
     private CommandFind find;
-    private CommandSupport support;
     private CommandDeveloper developer;
     public static boolean worldCreation = false;
     String WorldEngine;
@@ -172,16 +169,6 @@ public class CommandIris implements DecreeExecutor {
     @Decree(description = "Print version information")
     public void version() {
         sender().sendMessage(C.GREEN + "Iris v" + Iris.instance.getDescription().getVersion() + " by Volmit Software");
-    }
-
-    //todo Move to React
-    @Decree(description = "Benchmark your server", origin = DecreeOrigin.CONSOLE)
-    public void serverbenchmark() throws InterruptedException {
-        if(!inProgress) {
-            IrisBenchmarking.runBenchmark();
-        } else {
-            Iris.info(C.RED + "Benchmark already is in progress.");
-        }
     }
 
     /*
@@ -412,7 +399,7 @@ public class CommandIris implements DecreeExecutor {
     ) {
         sender().sendMessage(C.GREEN + "Downloading pack: " + pack + "/" + branch + (trim ? " trimmed" : "") + (overwrite ? " overwriting" : ""));
         if (pack.equals("overworld")) {
-            String url = "https://github.com/IrisDimensions/overworld/releases/download/" + Iris.OVERWORLD_TAG + "/overworld.zip";
+            String url = "https://github.com/IrisDimensions/overworld/releases/download/" + INMS.OVERWORLD_TAG + "/overworld.zip";
             Iris.service(StudioSVC.class).downloadRelease(sender(), url, trim, overwrite);
         } else {
             Iris.service(StudioSVC.class).downloadSearch(sender(), "IrisDimensions/" + pack + "/" + branch, trim, overwrite);
@@ -598,10 +585,10 @@ public class CommandIris implements DecreeExecutor {
                     continue;
                 }
                 Iris.info(C.LIGHT_PURPLE + "Preparing Spawn for " + s + "' using Iris:" + generator + "...");
-                new WorldCreator(s)
+                WorldCreator c = new WorldCreator(s)
                         .generator(getDefaultWorldGenerator(s, generator))
-                        .environment(IrisData.loadAnyDimension(generator).getEnvironment())
-                        .createWorld();
+                        .environment(IrisData.loadAnyDimension(generator).getEnvironment());
+                INMS.get().createWorld(c);
                 Iris.info(C.LIGHT_PURPLE + "Loaded " + s + "!");
             }
         } catch (Throwable e) {

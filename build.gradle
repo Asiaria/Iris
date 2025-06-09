@@ -1,3 +1,5 @@
+import xyz.jpenilla.runpaper.task.RunServer
+
 /*
  * Iris is a World Generator for Minecraft Bukkit Servers
  * Copyright (c) 2021 Arcane Arts (Volmit Software)
@@ -30,10 +32,12 @@ plugins {
     id 'java-library'
     id "io.github.goooler.shadow" version "8.1.7"
     id "de.undercouch.download" version "5.0.1"
+    id "xyz.jpenilla.run-paper" version "2.3.1"
+    id "io.sentry.jvm.gradle" version "5.7.0"
 }
 
 
-version '3.6.2-1.20.1-1.21.4'
+version '3.6.10-1.20.1-1.21.5'
 
 // ADD YOURSELF AS A NEW LINE IF YOU WANT YOUR OWN BUILD TASK GENERATED
 // ======================== WINDOWS =============================
@@ -53,7 +57,13 @@ registerCustomOutputTaskUnix('PixelMac', '/Users/test/Desktop/mcserver/plugins')
 registerCustomOutputTaskUnix('CrazyDev22LT', '/home/julian/Desktop/server/plugins')
 // ==============================================================
 
+def MIN_HEAP_SIZE = "2G"
+def MAX_HEAP_SIZE = "8G"
+//Valid values are: none, truecolor, indexed256, indexed16, indexed8
+def COLOR = "truecolor"
+
 def NMS_BINDINGS = Map.of(
+        "v1_21_R4", "1.21.5-R0.1-SNAPSHOT",
         "v1_21_R3", "1.21.4-R0.1-SNAPSHOT",
         "v1_21_R2", "1.21.3-R0.1-SNAPSHOT",
         "v1_21_R1", "1.21.1-R0.1-SNAPSHOT",
@@ -62,20 +72,33 @@ def NMS_BINDINGS = Map.of(
         "v1_20_R2", "1.20.2-R0.1-SNAPSHOT",
         "v1_20_R1", "1.20.1-R0.1-SNAPSHOT",
 )
-def JVM_VERSION = Map.of()
-NMS_BINDINGS.each { nms ->
-    project(":nms:${nms.key}") {
+def JVM_VERSION = Map.<String, Integer>of()
+NMS_BINDINGS.forEach { key, value ->
+    project(":nms:$key") {
         apply plugin: 'java'
         apply plugin: 'com.volmit.nmstools'
 
         nmsTools {
-            it.jvm = JVM_VERSION.getOrDefault(nms.key, 21)
-            it.version = nms.value
+            it.jvm = JVM_VERSION.getOrDefault(key, 21)
+            it.version = value
         }
 
         dependencies {
             implementation project(":core")
         }
+    }
+
+    tasks.register("runServer-$key", RunServer) {
+        group("servers")
+        minecraftVersion(value.split("-")[0])
+        minHeapSize(MIN_HEAP_SIZE)
+        maxHeapSize(MAX_HEAP_SIZE)
+        pluginJars(tasks.shadowJar.archiveFile)
+        javaLauncher = javaToolchains.launcherFor { it.languageVersion = JavaLanguageVersion.of(JVM_VERSION.getOrDefault(key, 21))}
+        runDirectory.convention(layout.buildDirectory.dir("run/$key"))
+        systemProperty("disable.watchdog", "")
+        systemProperty("net.kyori.ansi.colorLevel", COLOR)
+        systemProperty("com.mojang.eula.agree", true)
     }
 }
 
@@ -91,7 +114,13 @@ shadowJar {
     relocate 'io.papermc.lib', 'com.volmit.iris.util.paper'
     relocate 'net.kyori', 'com.volmit.iris.util.kyori'
     relocate 'org.bstats', 'com.volmit.util.metrics'
+    relocate "io.sentry", "com.volmit.iris.util.sentry"
     archiveFileName.set("Iris-${project.version}.jar")
+
+    dependencies {
+        exclude(dependency("org.ow2.asm:asm:"))
+        exclude(dependency("org.jetbrains:"))
+    }
 }
 
 dependencies {
@@ -105,6 +134,7 @@ configurations.configureEach {
 
 allprojects {
     apply plugin: 'java'
+    apply plugin: 'io.sentry.jvm.gradle'
 
     repositories {
         mavenCentral()
@@ -118,7 +148,7 @@ allprojects {
         maven { url "https://repo.triumphteam.dev/snapshots" }
         maven { url "https://repo.mineinabyss.com/releases" }
         maven { url 'https://hub.jeff-media.com/nexus/repository/jeff-media-public/' }
-        maven { url "https://repo.nexomc.com/snapshots/" }
+        maven { url "https://repo.nexomc.com/releases/" }
         maven { url "https://libraries.minecraft.net" }
     }
 
@@ -175,6 +205,16 @@ allprojects {
     task javadocJar(type: Jar, dependsOn: javadoc) {
         archiveClassifier.set('javadoc')
         from javadoc.destinationDir
+    }
+
+    sentry {
+        includeSourceContext = true
+
+        org = "volmit-software"
+        projectName = "iris"
+        authToken = hasProperty("sentry.auth.token") ?
+                property("sentry.auth.token") :
+                System.getenv("SENTRY_AUTH_TOKEN")
     }
 }
 
@@ -252,3 +292,39 @@ def registerCustomOutputTaskUnix(name, path) {
 }
 
 tasks.build.dependsOn(shadowJar)
+
+def cli = file("sentry-cli.exe")
+tasks.register("downloadCli", Download) {
+    group = "sentry"
+    src "https://release-registry.services.sentry.io/apps/sentry-cli/latest?response=download&arch=x86_64&platform=${System.getProperty("os.name")}&package=sentry-cli"
+    dest cli
+
+    doLast {
+        cli.setExecutable(true)
+    }
+}
+
+tasks.register("release") {
+    group = "sentry"
+    dependsOn("downloadCli")
+    doLast {
+        def authToken = project.hasProperty("sentry.auth.token") ?
+                project.property("sentry.auth.token") :
+                System.getenv("SENTRY_AUTH_TOKEN")
+        def org = "volmit-software"
+        def projectName = "iris"
+        exec {
+            executable(cli)
+            args("releases", "new", "--auth-token", authToken, "-o", org, "-p", projectName, version)
+        }
+        exec {
+            executable(cli)
+            args("releases", "set-commits", "--auth-token", authToken, "-o", org, "-p", projectName, version, "--auto")
+        }
+        exec {
+            executable(cli)
+            args("releases", "finalize", "--auth-token", authToken, "-o", org, "-p", projectName, version)
+        }
+        cli.delete()
+    }
+}
