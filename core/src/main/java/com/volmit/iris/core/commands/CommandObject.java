@@ -38,7 +38,6 @@ import com.volmit.iris.util.decree.specialhandlers.ObjectHandler;
 import com.volmit.iris.util.format.C;
 import com.volmit.iris.util.math.Direction;
 import com.volmit.iris.util.math.RNG;
-import com.volmit.iris.util.scheduling.Queue;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.data.BlockData;
@@ -79,9 +78,9 @@ public class CommandObject implements DecreeExecutor {
                 futureBlockChanges.put(block, block.getBlockData());
 
                 if (d instanceof IrisCustomData data) {
-                    block.setBlockData(data.getBase());
+                    block.setBlockData(data.getBase(), false);
                     Iris.warn("Tried to place custom block at " + x + ", " + y + ", " + z + " which is not supported!");
-                } else block.setBlockData(d);
+                } else block.setBlockData(d, false);
             }
 
             @Override
@@ -125,6 +124,16 @@ public class CommandObject implements DecreeExecutor {
             }
 
             @Override
+            public <T> void setData(int xx, int yy, int zz, T data) {
+
+            }
+
+            @Override
+            public <T> T getData(int xx, int yy, int zz, Class<T> t) {
+                return null;
+            }
+
+            @Override
             public Engine getEngine() {
                 return null;
             }
@@ -136,11 +145,11 @@ public class CommandObject implements DecreeExecutor {
             @Param(description = "The object to analyze", customHandler = ObjectHandler.class)
             String object
     ) {
-        IrisObject o = IrisData.loadAnyObject(object);
+        IrisObject o = IrisData.loadAnyObject(object, data());
         sender().sendMessage("Object Size: " + o.getW() + " * " + o.getH() + " * " + o.getD() + "");
         sender().sendMessage("Blocks Used: " + NumberFormat.getIntegerInstance().format(o.getBlocks().size()));
 
-        Queue<BlockData> queue = o.getBlocks().enqueueValues();
+        var queue = o.getBlocks().values();
         Map<Material, Set<BlockData>> unsorted = new HashMap<>();
         Map<BlockData, Integer> amounts = new HashMap<>();
         Map<Material, Integer> materials = new HashMap<>();
@@ -201,7 +210,7 @@ public class CommandObject implements DecreeExecutor {
 
     @Decree(description = "Shrink an object to its minimum size")
     public void shrink(@Param(description = "The object to shrink", customHandler = ObjectHandler.class) String object) {
-        IrisObject o = IrisData.loadAnyObject(object);
+        IrisObject o = IrisData.loadAnyObject(object, data());
         sender().sendMessage("Current Object Size: " + o.getW() + " * " + o.getH() + " * " + o.getD());
         o.shrinkwrap();
         sender().sendMessage("New Object Size: " + o.getW() + " * " + o.getH() + " * " + o.getD());
@@ -241,7 +250,8 @@ public class CommandObject implements DecreeExecutor {
 
 
         Location[] b = WandSVC.getCuboid(player());
-        if (b == null) {
+        if (b == null || b[0] == null || b[1] == null) {
+            sender().sendMessage("No area selected.");
             return;
         }
         Location a1 = b[0].clone();
@@ -324,7 +334,7 @@ public class CommandObject implements DecreeExecutor {
 //            @Param(description = "The scale interpolator to use", defaultValue = "none")
 //            IrisObjectPlacementScaleInterpolator interpolator
     ) {
-        IrisObject o = IrisData.loadAnyObject(object);
+        IrisObject o = IrisData.loadAnyObject(object, data());
         double maxScale = Double.max(10 - o.getBlocks().size() / 10000d, 1);
         if (scale > maxScale) {
             sender().sendMessage(C.YELLOW + "Indicated scale exceeds maximum. Downscaled to maximum: " + maxScale);
@@ -417,6 +427,10 @@ public class CommandObject implements DecreeExecutor {
         }
 
         Location[] b = WandSVC.getCuboid(player());
+        if (b == null || b[0] == null || b[1] == null) {
+            sender().sendMessage("No area selected.");
+            return;
+        }
         Location a1 = b[0].clone();
         Location a2 = b[1].clone();
         Direction d = Direction.closest(player().getLocation().getDirection()).reverse();
@@ -477,6 +491,10 @@ public class CommandObject implements DecreeExecutor {
         }
 
         Location[] b = WandSVC.getCuboid(player());
+        if (b == null || b[0] == null || b[1] == null) {
+            sender().sendMessage("No area selected.");
+            return;
+        }
         Location a1 = b[0].clone();
         Location a2 = b[1].clone();
         Location a1x = b[0].clone();
@@ -524,6 +542,10 @@ public class CommandObject implements DecreeExecutor {
         }
 
         Location[] b = WandSVC.getCuboid(player());
+        if (b == null || b[0] == null || b[1] == null) {
+            sender().sendMessage("No area selected.");
+            return;
+        }
         b[0].add(new Vector(0, 1, 0));
         b[1].add(new Vector(0, 1, 0));
         Location a1 = b[0].clone();

@@ -20,7 +20,10 @@ package com.volmit.iris.engine;
 
 import com.volmit.iris.Iris;
 import com.volmit.iris.core.IrisSettings;
+import com.volmit.iris.core.link.Identifier;
 import com.volmit.iris.core.loader.IrisData;
+import com.volmit.iris.core.service.ExternalDataSVC;
+import com.volmit.iris.engine.data.cache.Cache;
 import com.volmit.iris.engine.framework.Engine;
 import com.volmit.iris.engine.framework.EngineAssignedWorldManager;
 import com.volmit.iris.engine.object.*;
@@ -29,7 +32,7 @@ import com.volmit.iris.util.collection.KMap;
 import com.volmit.iris.util.collection.KSet;
 import com.volmit.iris.util.format.Form;
 import com.volmit.iris.util.mantle.Mantle;
-import com.volmit.iris.util.mantle.MantleFlag;
+import com.volmit.iris.util.mantle.flag.MantleFlag;
 import com.volmit.iris.util.math.M;
 import com.volmit.iris.util.math.Position2;
 import com.volmit.iris.util.math.RNG;
@@ -55,13 +58,10 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.inventory.ItemStack;
 
-import java.lang.ref.WeakReference;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -79,6 +79,8 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
     private final ChronoLatch cln;
     private final ChronoLatch chunkUpdater;
     private final ChronoLatch chunkDiscovery;
+    private final KMap<Long, Future<?>> cleanup = new KMap<>();
+    private final ScheduledExecutorService cleanupService;
     private double energy = 25;
     private int entityCount = 0;
     private long charge = 0;
@@ -96,6 +98,7 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
         looper = null;
         chunkUpdater = null;
         chunkDiscovery = null;
+        cleanupService = null;
         id = -1;
     }
 
@@ -107,6 +110,11 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
         cl = new ChronoLatch(3000);
         ecl = new ChronoLatch(250);
         clw = new ChronoLatch(1000, true);
+        cleanupService = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            var thread = new Thread(runnable, "Iris Mantle Cleanup " + getTarget().getWorld().name());
+            thread.setPriority(Thread.MIN_PRIORITY);
+            return thread;
+        });
         id = engine.getCacheID();
         energy = 25;
         looper = new Looper() {
@@ -118,10 +126,6 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
 
                 if (!getEngine().getWorld().hasRealWorld() && clw.flip()) {
                     getEngine().getWorld().tryGetRealWorld();
-                }
-
-                if (!IrisSettings.get().getWorld().isMarkerEntitySpawningSystem() && !IrisSettings.get().getWorld().isAnbientEntitySpawningSystem()) {
-                    return 3000;
                 }
 
                 if (getEngine().getWorld().hasRealWorld()) {
@@ -137,6 +141,13 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
                         discoverChunks();
                     }
 
+                    if (cln.flip()) {
+                        engine.getEngineData().cleanup(getEngine());
+                    }
+
+                    if (!IrisSettings.get().getWorld().isMarkerEntitySpawningSystem() && !IrisSettings.get().getWorld().isAnbientEntitySpawningSystem()) {
+                        return 3000;
+                    }
 
                     if (getDimension().isInfiniteEnergy()) {
                         energy += 1000;
@@ -146,10 +157,6 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
                     if (M.ms() < charge) {
                         energy += 70;
                         fixEnergy();
-                    }
-
-                    if (cln.flip()) {
-                        engine.getEngineData().cleanup(getEngine());
                     }
 
                     if (precount != null) {
@@ -179,7 +186,7 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
             }
         };
         looper.setPriority(Thread.MIN_PRIORITY);
-        looper.setName("Iris World Manager");
+        looper.setName("Iris World Manager " + getTarget().getWorld().name());
         looper.start();
     }
 
@@ -423,19 +430,42 @@ public class IrisWorldManager extends EngineAssignedWorldManager {
             return;
         }
 
-        var ref = new WeakReference<>(e.getWorld());
-        int x = e.getX(), z = e.getZ();
-        J.s(() -> {
-            World world = ref.get();
-            if (world == null || !world.isChunkLoaded(x, z))
-                return;
+        int cX = e.getX(), cZ = e.getZ();
+        Long key = Cache.key(e);
+        cleanup.put(key, cleanupService.schedule(() -> {
+            cleanup.remove(key);
             energy += 0.3;
             fixEnergy();
-            getEngine().cleanupMantleChunk(x, z);
-        }, IrisSettings.get().getPerformance().mantleCleanupDelay);
+            getEngine().cleanupMantleChunk(cX, cZ);
+        }, Math.max(IrisSettings.get().getPerformance().mantleCleanupDelay * 50L, 0), TimeUnit.MILLISECONDS));
 
         if (generated) {
             //INMS.get().injectBiomesFromMantle(e, getMantle());
+
+            if (!IrisSettings.get().getGenerator().earlyCustomBlocks) return;
+            Iris.tickets.addTicket(e);
+            J.s(() -> {
+                var chunk = getMantle().getChunk(e).use();
+                int minY = getTarget().getWorld().minHeight();
+                try {
+                    chunk.raiseFlagUnchecked(MantleFlag.CUSTOM, () -> {
+                        chunk.iterate(Identifier.class, (x, y, z, v) -> {
+                            Iris.service(ExternalDataSVC.class).processUpdate(getEngine(), e.getBlock(x & 15, y + minY, z & 15), v);
+                        });
+                    });
+                } finally {
+                    chunk.release();
+                    Iris.tickets.removeTicket(e);
+                }
+            }, RNG.r.i(20, 60));
+        }
+    }
+
+    @Override
+    public void onChunkUnload(Chunk e) {
+        final var future = cleanup.remove(Cache.key(e));
+        if (future != null) {
+            future.cancel(false);
         }
     }
 

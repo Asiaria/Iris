@@ -1,17 +1,22 @@
 package com.volmit.iris.core.nms.v1_21_R3;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
-import com.mojang.serialization.Lifecycle;
 import com.volmit.iris.Iris;
+import com.volmit.iris.core.link.Identifier;
 import com.volmit.iris.core.nms.INMSBinding;
-import com.volmit.iris.core.nms.container.AutoClosing;
 import com.volmit.iris.core.nms.container.BiomeColor;
 import com.volmit.iris.core.nms.container.Pair;
+import com.volmit.iris.core.nms.container.StructurePlacement;
+import com.volmit.iris.core.nms.container.BlockProperty;
 import com.volmit.iris.core.nms.datapack.DataVersion;
 import com.volmit.iris.engine.data.cache.AtomicCache;
 import com.volmit.iris.engine.framework.Engine;
+import com.volmit.iris.engine.object.IrisJigsawStructurePlacement;
+import com.volmit.iris.engine.platform.PlatformChunkGenerator;
+import com.volmit.iris.util.agent.Agent;
 import com.volmit.iris.util.collection.KList;
 import com.volmit.iris.util.collection.KMap;
+import com.volmit.iris.util.format.C;
 import com.volmit.iris.util.hunk.Hunk;
 import com.volmit.iris.util.json.JSONObject;
 import com.volmit.iris.util.mantle.Mantle;
@@ -22,20 +27,24 @@ import com.volmit.iris.util.nbt.mca.palette.*;
 import com.volmit.iris.util.nbt.tag.CompoundTag;
 import com.volmit.iris.util.scheduling.J;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
-import lombok.SneakyThrows;
-import net.minecraft.core.Registry;
+import it.unimi.dsi.fastutil.shorts.ShortList;
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.asm.Advice;
+import net.bytebuddy.matcher.ElementMatchers;
 import net.minecraft.core.*;
+import net.minecraft.core.Registry;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.*;
+import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.WorldLoader;
 import net.minecraft.server.commands.data.BlockDataAccessor;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.progress.ChunkProgressListener;
 import net.minecraft.tags.TagKey;
+import net.minecraft.world.RandomSequences;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.level.LevelReader;
@@ -45,15 +54,20 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.chunk.status.WorldGenContext;
-import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
 import net.minecraft.world.level.levelgen.flat.FlatLayerInfo;
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
+import net.minecraft.world.level.levelgen.structure.placement.ConcentricRingsStructurePlacement;
+import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement;
+import net.minecraft.world.level.storage.LevelStorageSource;
+import net.minecraft.world.level.storage.PrimaryLevelData;
 import org.bukkit.*;
 import org.bukkit.block.Biome;
 import org.bukkit.block.data.BlockData;
@@ -64,9 +78,11 @@ import org.bukkit.craftbukkit.v1_21_R3.block.CraftBlockState;
 import org.bukkit.craftbukkit.v1_21_R3.block.CraftBlockStates;
 import org.bukkit.craftbukkit.v1_21_R3.block.data.CraftBlockData;
 import org.bukkit.craftbukkit.v1_21_R3.inventory.CraftItemStack;
+import org.bukkit.craftbukkit.v1_21_R3.util.CraftMagicNumbers;
 import org.bukkit.craftbukkit.v1_21_R3.util.CraftNamespacedKey;
 import org.bukkit.entity.Entity;
 import org.bukkit.event.entity.CreatureSpawnEvent;
+import org.bukkit.generator.BiomeProvider;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.ItemStack;
 import org.jetbrains.annotations.Contract;
@@ -74,23 +90,24 @@ import org.jetbrains.annotations.NotNull;
 
 import java.awt.Color;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.List;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class NMSBinding implements INMSBinding {
     private final KMap<Biome, Object> baseBiomeCache = new KMap<>();
     private final BlockData AIR = Material.AIR.createBlockData();
     private final AtomicCache<MCAIdMap<net.minecraft.world.level.biome.Biome>> biomeMapCache = new AtomicCache<>();
-    private final AtomicCache<WorldLoader.DataLoadContext> dataLoadContext = new AtomicCache<>();
+    private final AtomicBoolean injected = new AtomicBoolean();
     private final AtomicCache<MCAIdMapper<BlockState>> registryCache = new AtomicCache<>();
     private final AtomicCache<MCAPalette<BlockState>> globalCache = new AtomicCache<>();
     private final AtomicCache<RegistryAccess> registryAccess = new AtomicCache<>();
-    private final ReentrantLock dataContextLock = new ReentrantLock(true);
     private final AtomicCache<Method> byIdRef = new AtomicCache<>();
     private Field biomeStorageCache = null;
 
@@ -168,14 +185,14 @@ public class NMSBinding implements INMSBinding {
     }
 
     @Contract(value = "null, _, _ -> null", pure = true)
-    private Object convertFromTag(net.minecraft.nbt.Tag tag, int depth, int maxDepth) {
+    private Object convertFromTag(Tag tag, int depth, int maxDepth) {
         if (tag == null || depth > maxDepth) return null;
         return switch (tag) {
             case CollectionTag<?> collection -> {
                 KList<Object> list = new KList<>();
 
                 for (Object i : collection) {
-                    if (i instanceof net.minecraft.nbt.Tag t)
+                    if (i instanceof Tag t)
                         list.add(convertFromTag(t, depth + 1, maxDepth));
                     else list.add(i);
                 }
@@ -232,7 +249,7 @@ public class NMSBinding implements INMSBinding {
                 yield tag;
             }
             case List<?> list -> {
-                var tag = new net.minecraft.nbt.ListTag();
+                var tag = new ListTag();
                 for (var i : list) {
                     tag.add(convertToTag(i, depth + 1, maxDepth));
                 }
@@ -486,13 +503,13 @@ public class NMSBinding implements INMSBinding {
     @Override
     public MCAPaletteAccess createPalette() {
         MCAIdMapper<BlockState> registry = registryCache.aquireNasty(() -> {
-            Field cf = net.minecraft.core.IdMapper.class.getDeclaredField("tToId");
-            Field df = net.minecraft.core.IdMapper.class.getDeclaredField("idToT");
-            Field bf = net.minecraft.core.IdMapper.class.getDeclaredField("nextId");
+            Field cf = IdMapper.class.getDeclaredField("tToId");
+            Field df = IdMapper.class.getDeclaredField("idToT");
+            Field bf = IdMapper.class.getDeclaredField("nextId");
             cf.setAccessible(true);
             df.setAccessible(true);
             bf.setAccessible(true);
-            net.minecraft.core.IdMapper<BlockState> blockData = Block.BLOCK_STATE_REGISTRY;
+            IdMapper<BlockState> blockData = Block.BLOCK_STATE_REGISTRY;
             int b = bf.getInt(blockData);
             Object2IntMap<BlockState> c = (Object2IntMap<BlockState>) cf.get(blockData);
             List<BlockState> d = (List<BlockState>) df.get(blockData);
@@ -590,7 +607,7 @@ public class NMSBinding implements INMSBinding {
     }
 
     @Override
-    public java.awt.Color getBiomeColor(Location location, BiomeColor type) {
+    public Color getBiomeColor(Location location, BiomeColor type) {
         LevelReader reader = ((CraftWorld) location.getWorld()).getHandle();
         var holder = reader.getBiome(new BlockPos(location.getBlockX(), location.getBlockY(), location.getBlockZ()));
         var biome = holder.value();
@@ -636,7 +653,7 @@ public class NMSBinding implements INMSBinding {
 
     @Override
     public DataVersion getDataVersion() {
-        return DataVersion.V1213;
+        return DataVersion.V1_21_3;
     }
 
     @Override
@@ -665,103 +682,178 @@ public class NMSBinding implements INMSBinding {
     }
 
     @Override
-    @SneakyThrows
-    public AutoClosing injectLevelStems() {
-        if (!dataContextLock.tryLock()) throw new IllegalStateException("Failed to inject data context!");
-
-        var server = ((CraftServer) Bukkit.getServer());
-        var field = getField(MinecraftServer.class, WorldLoader.DataLoadContext.class);
-        var nmsServer = server.getServer();
-        var old = nmsServer.worldLoader;
-
-        field.setAccessible(true);
-        field.set(nmsServer, dataLoadContext.aquire(() -> new WorldLoader.DataLoadContext(
-                old.resources(),
-                old.dataConfiguration(),
-                old.datapackWorldgen(),
-                createRegistryAccess(old.datapackDimensions(), false, true, true, true)
-        )));
-
-        return new AutoClosing(() -> {
-            field.set(nmsServer, old);
-            dataContextLock.unlock();
-        });
+    public boolean missingDimensionTypes(String... keys) {
+        var type = registry().lookupOrThrow(Registries.DIMENSION_TYPE);
+        return !Arrays.stream(keys)
+                .map(key -> ResourceLocation.fromNamespaceAndPath("iris", key))
+                .allMatch(type::containsKey);
     }
 
     @Override
-    @SneakyThrows
-    public AutoClosing injectUncached(boolean overworld, boolean nether, boolean end) {
-        var reg = registry();
-        var field = getField(RegistryAccess.ImmutableRegistryAccess.class, Map.class);
-        field.setAccessible(true);
+    public boolean injectBukkit() {
+        if (injected.getAndSet(true))
+            return true;
+        try {
+            Iris.info("Injecting Bukkit");
+            var buddy = new ByteBuddy();
+            buddy.redefine(ServerLevel.class)
+                    .visit(Advice.to(ServerLevelAdvice.class).on(ElementMatchers.isConstructor().and(ElementMatchers.takesArguments(
+                            MinecraftServer.class, Executor.class, LevelStorageSource.LevelStorageAccess.class, PrimaryLevelData.class,
+                            ResourceKey.class, LevelStem.class, ChunkProgressListener.class, boolean.class, long.class, List.class,
+                            boolean.class, RandomSequences.class, World.Environment.class, ChunkGenerator.class, BiomeProvider.class))))
+                    .make()
+                    .load(ServerLevel.class.getClassLoader(), Agent.installed());
+            for (Class<?> clazz : List.of(ChunkAccess.class, ProtoChunk.class)) {
+                buddy.redefine(clazz)
+                        .visit(Advice.to(ChunkAccessAdvice.class).on(ElementMatchers.isMethod().and(ElementMatchers.takesArguments(ShortList.class, int.class))))
+                        .make()
+                        .load(clazz.getClassLoader(), Agent.installed());
+            }
 
-        var access = createRegistryAccess(((CraftServer) Bukkit.getServer()).getServer().worldLoader.datapackDimensions(), true, overworld, nether, end);
-        var injected = access.lookupOrThrow(Registries.LEVEL_STEM);
-        var old = (Map<ResourceKey<? extends Registry<?>>, Registry<?>>) field.get(reg);
-        var fake = new HashMap<>(old);
-        fake.put(Registries.LEVEL_STEM, injected);
-        field.set(reg, fake);
-
-        return new AutoClosing(() -> field.set(reg, old));
+            return true;
+        } catch (Throwable e) {
+            Iris.error(C.RED + "Failed to inject Bukkit");
+            e.printStackTrace();
+        }
+        return false;
     }
 
     @Override
-    public boolean missingDimensionTypes(boolean overworld, boolean nether, boolean end) {
-        var registry = registry().lookupOrThrow(Registries.DIMENSION_TYPE);
-        if (overworld) overworld = !registry.containsKey(createIrisKey(LevelStem.OVERWORLD));
-        if (nether) nether = !registry.containsKey(createIrisKey(LevelStem.NETHER));
-        if (end) end = !registry.containsKey(createIrisKey(LevelStem.END));
-        return overworld || nether || end;
+    public KMap<Material, List<BlockProperty>> getBlockProperties() {
+        KMap<Material, List<BlockProperty>> states = new KMap<>();
+
+        for (var block : registry().lookupOrThrow(Registries.BLOCK)) {
+            var state = block.defaultBlockState();
+            if (state == null) state = block.getStateDefinition().any();
+            final var finalState = state;
+
+            states.put(CraftMagicNumbers.getMaterial(block), block.getStateDefinition()
+                    .getProperties()
+                    .stream()
+                    .map(p -> createProperty(p, finalState))
+                    .toList());
+        }
+        return states;
+    }
+
+    private <T extends Comparable<T>> BlockProperty createProperty(Property<T> property, BlockState state) {
+        return new BlockProperty(property.getName(), property.getValueClass(), state.getValue(property), property.getPossibleValues(), property::getName);
     }
 
     @Override
-    public void removeCustomDimensions(World world) {
-        ((CraftWorld) world).getHandle().L.customDimensions = null;
+    public void placeStructures(Chunk chunk) {
+        var craft = ((CraftChunk) chunk);
+        var level = craft.getCraftWorld().getHandle();
+        var access = ((CraftChunk) chunk).getHandle(ChunkStatus.FULL);
+        level.getChunkSource().getGenerator().applyBiomeDecoration(level, access, level.structureManager());
     }
 
-    private RegistryAccess.Frozen createRegistryAccess(RegistryAccess.Frozen datapack, boolean copy, boolean overworld, boolean nether, boolean end) {
-        var access = registry();
-        var dimensions = access.lookupOrThrow(Registries.DIMENSION_TYPE);
+    @Override
+    public KMap<Identifier, StructurePlacement> collectStructures() {
+        var structureSets = registry().lookupOrThrow(Registries.STRUCTURE_SET);
+        var structurePlacements = registry().lookupOrThrow(Registries.STRUCTURE_PLACEMENT);
+        return structureSets.keySet()
+                .stream()
+                .map(structureSets::get)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .map(holder -> {
+                    var set = holder.value();
+                    var placement = set.placement();
+                    var key = holder.key().location();
+                    StructurePlacement.StructurePlacementBuilder<?, ?> builder;
+                    if (placement instanceof RandomSpreadStructurePlacement random) {
+                        builder = StructurePlacement.RandomSpread.builder()
+                                .separation(random.separation())
+                                .spacing(random.spacing())
+                                .spreadType(switch (random.spreadType()) {
+                                    case LINEAR -> IrisJigsawStructurePlacement.SpreadType.LINEAR;
+                                    case TRIANGULAR -> IrisJigsawStructurePlacement.SpreadType.TRIANGULAR;
+                                });
+                    } else if (placement instanceof ConcentricRingsStructurePlacement rings) {
+                        builder = StructurePlacement.ConcentricRings.builder()
+                                .distance(rings.distance())
+                                .spread(rings.spread())
+                                .count(rings.count());
+                    } else {
+                        Iris.warn("Unsupported structure placement for set " + key + " with type " + structurePlacements.getKey(placement.type()));
+                        return null;
+                    }
 
-        var settings = new FlatLevelGeneratorSettings(
-                Optional.empty(),
-                access.lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.THE_VOID),
-                List.of()
-        );
+                    return new Pair<>(new Identifier(key.getNamespace(), key.getPath()), builder
+                            .salt(placement.salt)
+                            .frequency(placement.frequency)
+                            .structures(set.structures()
+                                    .stream()
+                                    .map(entry -> new StructurePlacement.Structure(
+                                            entry.weight(),
+                                            entry.structure()
+                                                    .unwrapKey()
+                                                    .map(ResourceKey::location)
+                                                    .map(ResourceLocation::toString)
+                                                    .orElse(null),
+                                            entry.structure().tags()
+                                                    .map(TagKey::location)
+                                                    .map(ResourceLocation::toString)
+                                                    .toList()
+                                    ))
+                                    .filter(StructurePlacement.Structure::isValid)
+                                    .toList())
+                            .build());
+                })
+                .filter(Objects::nonNull)
+                .collect(Collectors.toMap(Pair::getA, Pair::getB, (a,b) -> a, KMap::new));
+    }
+
+    public LevelStem levelStem(RegistryAccess access, ChunkGenerator raw) {
+        if (!(raw instanceof PlatformChunkGenerator gen))
+            throw new IllegalStateException("Generator is not platform chunk generator!");
+
+        var dimensionKey = ResourceLocation.fromNamespaceAndPath("iris", gen.getTarget().getDimension().getDimensionTypeKey());
+        var dimensionType = access.lookupOrThrow(Registries.DIMENSION_TYPE).getOrThrow(ResourceKey.create(Registries.DIMENSION_TYPE, dimensionKey));
+        return new LevelStem(dimensionType, chunkGenerator(access));
+    }
+
+    private net.minecraft.world.level.chunk.ChunkGenerator chunkGenerator(RegistryAccess access) {
+        var settings = new FlatLevelGeneratorSettings(Optional.empty(), access.lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.THE_VOID), List.of());
         settings.getLayersInfo().add(new FlatLayerInfo(1, Blocks.AIR));
         settings.updateLayers();
-
-        var source = new FlatLevelSource(settings);
-        var fake = new MappedRegistry<>(Registries.LEVEL_STEM, Lifecycle.experimental());
-        if (overworld) register(fake, dimensions, source, LevelStem.OVERWORLD);
-        if (nether) register(fake, dimensions, source, LevelStem.NETHER);
-        if (end) register(fake, dimensions, source, LevelStem.END);
-        copy(fake, datapack.lookup(Registries.LEVEL_STEM).orElse(null));
-
-        if (copy) copy(fake, access.lookupOrThrow(Registries.LEVEL_STEM));
-
-        return new RegistryAccess.Frozen.ImmutableRegistryAccess(List.of(fake)).freeze();
+        return new FlatLevelSource(settings);
     }
 
-    private void register(MappedRegistry<LevelStem> target, Registry<DimensionType> dimensions, FlatLevelSource source, ResourceKey<LevelStem> key) {
-        var loc = createIrisKey(key);
-        target.register(key, new LevelStem(
-                dimensions.get(loc).orElseThrow(() -> new IllegalStateException("Missing dimension type " + loc + " in " + dimensions.keySet())),
-                source
-        ), RegistrationInfo.BUILT_IN);
+    private static class ChunkAccessAdvice {
+        @Advice.OnMethodEnter(skipOn = Advice.OnNonDefaultValue.class)
+        static boolean enter(@Advice.This ChunkAccess access, @Advice.Argument(1) int index) {
+            return index >= access.getPostProcessing().length;
+        }
     }
 
-    private void copy(MappedRegistry<LevelStem> target, Registry<LevelStem> source) {
-        if (source == null) return;
-        source.listElementIds().forEach(key -> {
-            var value = source.getValue(key);
-            var info = source.registrationInfo(key).orElse(null);
-            if (value != null && info != null && !target.containsKey(key))
-                target.register(key, value, info);
-        });
-    }
+    private static class ServerLevelAdvice {
+        @Advice.OnMethodEnter
+        static void enter(
+                @Advice.Argument(0) MinecraftServer server,
+                @Advice.Argument(3) PrimaryLevelData levelData,
+                @Advice.Argument(value = 5, readOnly = false) LevelStem levelStem,
+                @Advice.Argument(12) World.Environment env,
+                @Advice.Argument(value = 13) ChunkGenerator gen
+        ) {
+            if (gen == null || !gen.getClass().getPackageName().startsWith("com.volmit.iris"))
+                return;
 
-    private ResourceLocation createIrisKey(ResourceKey<LevelStem> key) {
-        return ResourceLocation.fromNamespaceAndPath("iris", key.location().getPath());
+            try {
+                Object bindings = Class.forName("com.volmit.iris.core.nms.INMS", true, Bukkit.getPluginManager().getPlugin("Iris")
+                                .getClass()
+                                .getClassLoader())
+                        .getDeclaredMethod("get")
+                        .invoke(null);
+                levelStem = (LevelStem) bindings.getClass()
+                        .getDeclaredMethod("levelStem", RegistryAccess.class, ChunkGenerator.class)
+                        .invoke(bindings, server.registryAccess(), gen);
+
+                levelData.customDimensions = null;
+            } catch (Throwable e) {
+                throw new RuntimeException("Iris failed to replace the levelStem", e instanceof InvocationTargetException ex ? ex.getCause() : e);
+            }
+        }
     }
 }

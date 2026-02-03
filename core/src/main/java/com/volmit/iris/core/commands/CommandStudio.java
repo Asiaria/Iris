@@ -46,18 +46,19 @@ import com.volmit.iris.util.interpolation.InterpolationMethod;
 import com.volmit.iris.util.io.IO;
 import com.volmit.iris.util.json.JSONArray;
 import com.volmit.iris.util.json.JSONObject;
+import com.volmit.iris.util.mantle.MantleChunk;
 import com.volmit.iris.util.math.M;
 import com.volmit.iris.util.math.Position2;
 import com.volmit.iris.util.math.RNG;
 import com.volmit.iris.util.math.Spiraler;
 import com.volmit.iris.util.noise.CNG;
-import com.volmit.iris.util.parallel.BurstExecutor;
 import com.volmit.iris.util.parallel.MultiBurst;
+import com.volmit.iris.util.parallel.SyncExecutor;
 import com.volmit.iris.util.plugin.VolmitSender;
 import com.volmit.iris.util.scheduling.J;
 import com.volmit.iris.util.scheduling.O;
 import com.volmit.iris.util.scheduling.PrecisionStopwatch;
-import com.volmit.iris.util.scheduling.jobs.QueueJob;
+import com.volmit.iris.util.scheduling.jobs.ParallelRadiusJob;
 import io.papermc.lib.PaperLib;
 import org.bukkit.*;
 import org.bukkit.event.inventory.InventoryType;
@@ -76,8 +77,8 @@ import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -91,18 +92,19 @@ public class CommandStudio implements DecreeExecutor {
         return duration.toString().substring(2).replaceAll("(\\d[HMS])(?!$)", "$1 ").toLowerCase();
     }
 
+    //TODO fix pack trimming
     @Decree(description = "Download a project.", aliases = "dl")
     public void download(
             @Param(name = "pack", description = "The pack to download", defaultValue = "overworld", aliases = "project")
             String pack,
             @Param(name = "branch", description = "The branch to download from", defaultValue = "master")
             String branch,
-            @Param(name = "trim", description = "Whether or not to download a trimmed version (do not enable when editing)", defaultValue = "false")
-            boolean trim,
+            //@Param(name = "trim", description = "Whether or not to download a trimmed version (do not enable when editing)", defaultValue = "false")
+            //boolean trim,
             @Param(name = "overwrite", description = "Whether or not to overwrite the pack with the downloaded one", aliases = "force", defaultValue = "false")
             boolean overwrite
     ) {
-        new CommandIris().download(pack, branch, trim, overwrite);
+        new CommandIris().download(pack, branch, overwrite);
     }
 
     @Decree(description = "Open a new studio world", aliases = "o", sync = true)
@@ -161,70 +163,74 @@ public class CommandStudio implements DecreeExecutor {
             @Param(name = "radius", description = "The radius of nearby cunks", defaultValue = "5")
             int radius
     ) {
-        if (IrisToolbelt.isIrisWorld(player().getWorld())) {
-            VolmitSender sender = sender();
-            J.a(() -> {
-                DecreeContext.touch(sender);
-                PlatformChunkGenerator plat = IrisToolbelt.access(player().getWorld());
-                Engine engine = plat.getEngine();
-                try {
-                    Chunk cx = player().getLocation().getChunk();
-                    KList<Runnable> js = new KList<>();
-                    BurstExecutor b = MultiBurst.burst.burst();
-                    b.setMulticore(false);
-                    int rad = engine.getMantle().getRadius();
-                    for (int i = -(radius + rad); i <= radius + rad; i++) {
-                        for (int j = -(radius + rad); j <= radius + rad; j++) {
-                            engine.getMantle().getMantle().deleteChunk(i + cx.getX(), j + cx.getZ());
-                        }
-                    }
-
-                    for (int i = -radius; i <= radius; i++) {
-                        for (int j = -radius; j <= radius; j++) {
-                            int finalJ = j;
-                            int finalI = i;
-                            b.queue(() -> plat.injectChunkReplacement(player().getWorld(), finalI + cx.getX(), finalJ + cx.getZ(), (f) -> {
-                                synchronized (js) {
-                                    js.add(f);
-                                }
-                            }));
-                        }
-                    }
-
-                    b.complete();
-                    sender().sendMessage(C.GREEN + "Regenerating " + Form.f(js.size()) + " Sections");
-                    QueueJob<Runnable> r = new QueueJob<>() {
-                        final KList<Future<?>> futures = new KList<>();
-
-                        @Override
-                        public void execute(Runnable runnable) {
-                            futures.add(J.sfut(runnable));
-
-                            if (futures.size() > 64) {
-                                while (futures.isNotEmpty()) {
-                                    try {
-                                        futures.remove(0).get();
-                                    } catch (InterruptedException | ExecutionException e) {
-                                        e.printStackTrace();
-                                    }
-                                }
-                            }
-                        }
-
-                        @Override
-                        public String getName() {
-                            return "Regenerating";
-                        }
-                    };
-                    r.queue(js);
-                    r.execute(sender());
-                } catch (Throwable e) {
-                    sender().sendMessage("Unable to parse view-distance");
-                }
-            });
-        } else {
+        World world = player().getWorld();
+        if (!IrisToolbelt.isIrisWorld(world)) {
             sender().sendMessage(C.RED + "You must be in an Iris World to use regen!");
         }
+
+        VolmitSender sender = sender();
+        var loc = player().getLocation().clone();
+
+        J.a(() -> {
+            PlatformChunkGenerator plat = IrisToolbelt.access(world);
+            Engine engine = plat.getEngine();
+            DecreeContext.touch(sender);
+            try (SyncExecutor executor = new SyncExecutor(20);
+                 var service = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors())
+            ) {
+                int x = loc.getBlockX() >> 4;
+                int z = loc.getBlockZ() >> 4;
+
+                int rad = engine.getMantle().getRadius();
+                var mantle = engine.getMantle().getMantle();
+                var chunkMap = new KMap<Position2, MantleChunk>();
+                ParallelRadiusJob prep = new ParallelRadiusJob(Integer.MAX_VALUE, service) {
+                    @Override
+                    protected void execute(int rX, int rZ) {
+                        if (Math.abs(rX) <= radius && Math.abs(rZ) <= radius) {
+                            mantle.deleteChunk(rX + x, rZ + z);
+                            return;
+                        }
+                        rX += x;
+                        rZ += z;
+                        chunkMap.put(new Position2(rX, rZ), mantle.getChunk(rX, rZ));
+                        mantle.deleteChunk(rX, rZ);
+                    }
+
+                    @Override
+                    public String getName() {
+                        return "Preparing Mantle";
+                    }
+                }.retarget(radius + rad, 0, 0);
+                CountDownLatch pLatch = new CountDownLatch(1);
+                prep.execute(sender(), pLatch::countDown);
+                pLatch.await();
+
+
+                ParallelRadiusJob job = new ParallelRadiusJob(Integer.MAX_VALUE, service) {
+                    @Override
+                    protected void execute(int x, int z) {
+                        plat.injectChunkReplacement(world, x, z, executor);
+                    }
+
+                    @Override
+                    public String getName() {
+                        return "Regenerating";
+                    }
+                }.retarget(radius, x, z);
+                CountDownLatch latch = new CountDownLatch(1);
+                job.execute(sender(), latch::countDown);
+                latch.await();
+
+                chunkMap.forEach((pos, chunk) ->
+                        mantle.getChunk(pos.getX(), pos.getZ()).copyFrom(chunk));
+            } catch (Throwable e) {
+                sender().sendMessage("Error while regenerating chunks");
+                e.printStackTrace();
+            } finally {
+                DecreeContext.remove();
+            }
+        });
     }
 
     @Decree(description = "Convert objects in the \"convert\" folder")
@@ -313,11 +319,15 @@ public class CommandStudio implements DecreeExecutor {
         O<Integer> ta = new O<>();
         ta.set(-1);
 
+        var sender = sender();
+        var player = player();
+        var engine = engine();
+
         ta.set(Bukkit.getScheduler().scheduleSyncRepeatingTask(Iris.instance, () ->
         {
-            if (!player().getOpenInventory().getType().equals(InventoryType.CHEST)) {
+            if (!player.getOpenInventory().getType().equals(InventoryType.CHEST)) {
                 Bukkit.getScheduler().cancelTask(ta.get());
-                sender().sendMessage(C.GREEN + "Opened inventory!");
+                sender.sendMessage(C.GREEN + "Opened inventory!");
                 return;
             }
 
@@ -325,13 +335,49 @@ public class CommandStudio implements DecreeExecutor {
                 inv.clear();
             }
 
-            engine().addItems(true, inv, new RNG(RNG.r.imax()), tables, InventorySlotType.STORAGE, player().getWorld(), player().getLocation().getBlockX(), player().getLocation().getBlockY(), player().getLocation().getBlockZ(), 1);
+            engine.addItems(true, inv, new RNG(RNG.r.imax()), tables, InventorySlotType.STORAGE, player.getWorld(), player.getLocation().getBlockX(), player.getLocation().getBlockY(), player.getLocation().getBlockZ(), 1);
         }, 0, fast ? 5 : 35));
 
         sender().sendMessage(C.GREEN + "Opening inventory now!");
         player().openInventory(inv);
     }
 
+    @Decree(description = "Calculate the chance for each region to generate", origin = DecreeOrigin.PLAYER)
+    public void regions(@Param(description = "The radius in chunks", defaultValue = "500") int radius) {
+        var engine = engine();
+        if (engine == null) {
+            sender().sendMessage(C.RED + "Only works in an Iris world!");
+            return;
+        }
+        var sender = sender();
+        var player = player();
+        Thread.ofVirtual()
+                .start(() -> {
+                    int d = radius * 2;
+                    KMap<String, AtomicInteger> data = new KMap<>();
+                    engine.getDimension().getRegions().forEach(key -> data.put(key, new AtomicInteger(0)));
+                    var multiBurst = new MultiBurst("Region Sampler");
+                    var executor = multiBurst.burst(radius * radius);
+                    sender.sendMessage(C.GRAY + "Generating data...");
+                    var loc = player.getLocation();
+                    int totalTasks = d * d;
+                    AtomicInteger completedTasks = new AtomicInteger(0);
+                    int c = J.ar(() -> sender.sendProgress((double) completedTasks.get() / totalTasks, "Finding regions"), 0);
+                    new Spiraler(d, d, (x, z) -> executor.queue(() -> {
+                        var region = engine.getRegion((x << 4) + 8, (z << 4) + 8);
+                        data.computeIfAbsent(region.getLoadKey(), (k) -> new AtomicInteger(0))
+                                .incrementAndGet();
+                        completedTasks.incrementAndGet();
+                    })).setOffset(loc.getBlockX(), loc.getBlockZ()).drain();
+                    executor.complete();
+                    multiBurst.close();
+                    J.car(c);
+
+                    sender.sendMessage(C.GREEN + "Done!");
+                    var loader = engine.getData().getRegionLoader();
+                    data.forEach((k, v) -> sender.sendMessage(C.GREEN + k + ": " + loader.load(k).getRarity() + " / " + Form.f((double) v.get() / totalTasks * 100, 2) + "%"));
+                });
+    }
 
     @Decree(description = "Get all structures in a radius of chunks", aliases = "dist", origin = DecreeOrigin.PLAYER)
     public void distances(@Param(description = "The radius in chunks") int radius) {
@@ -343,7 +389,7 @@ public class CommandStudio implements DecreeExecutor {
         var sender = sender();
         int d = radius * 2;
         KMap<String, KList<Position2>> data = new KMap<>();
-        var multiBurst = new MultiBurst("Distance Sampler", Thread.MIN_PRIORITY);
+        var multiBurst = new MultiBurst("Distance Sampler");
         var executor = multiBurst.burst(radius * radius);
 
         sender.sendMessage(C.GRAY + "Generating data...");
@@ -642,8 +688,14 @@ public class CommandStudio implements DecreeExecutor {
         }
 
         sender().sendMessage(C.GREEN + "Sending you to the studio world!");
-        player().teleport(Iris.service(StudioSVC.class).getActiveProject().getActiveProvider().getTarget().getWorld().spawnLocation());
-        player().setGameMode(GameMode.SPECTATOR);
+        var player = player();
+        PaperLib.teleportAsync(player(), Iris.service(StudioSVC.class)
+                .getActiveProject()
+                .getActiveProvider()
+                .getTarget()
+                .getWorld()
+                .spawnLocation()
+        ).thenRun(() -> player.setGameMode(GameMode.SPECTATOR));
     }
 
     @Decree(description = "Update your dimension projects VSCode workspace")

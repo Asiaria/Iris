@@ -29,7 +29,7 @@ import lombok.Data;
 @Data
 public class IrisContext {
     private static final KMap<Thread, IrisContext> context = new KMap<>();
-    private static ChronoLatch cl = new ChronoLatch(60000);
+    private static final ChronoLatch cl = new ChronoLatch(60000);
     private final Engine engine;
     private ChunkContext chunkContext;
 
@@ -53,25 +53,30 @@ public class IrisContext {
     }
 
     public static void touch(IrisContext c) {
-        synchronized (context) {
-            context.put(Thread.currentThread(), c);
+        context.put(Thread.currentThread(), c);
 
+        if (!cl.couldFlip()) return;
+        synchronized (cl) {
             if (cl.flip()) {
                 dereference();
             }
         }
     }
 
-    public static void dereference() {
-        synchronized (context) {
-            for (Thread i : context.k()) {
-                if (!i.isAlive() || context.get(i).engine.isClosed()) {
-                    if (context.get(i).engine.isClosed()) {
-                        Iris.debug("Dereferenced Context<Engine> " + i.getName() + " " + i.getId());
-                    }
+    public static synchronized void dereference() {
+        var it = context.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            var thread = entry.getKey();
+            var context = entry.getValue();
+            if (thread == null || context == null) {
+                it.remove();
+                continue;
+            }
 
-                    context.remove(i);
-                }
+            if (!thread.isAlive() || context.engine.isClosed()) {
+                Iris.debug("Dereferenced Context<Engine> " + thread.getName() + " " + thread.threadId());
+                it.remove();
             }
         }
     }
@@ -86,5 +91,22 @@ public class IrisContext {
 
     public IrisComplex getComplex() {
         return engine.getComplex();
+    }
+
+    public KMap<String, Object> asContext() {
+        var hash32 = engine.getHash32().getNow(null);
+        var dimension = engine.getDimension();
+        var mantle = engine.getMantle();
+        return new KMap<String, Object>()
+                .qput("studio", engine.isStudio())
+                .qput("closed", engine.isClosed())
+                .qput("pack", new KMap<>()
+                        .qput("key", dimension == null ? "" : dimension.getLoadKey())
+                        .qput("version", dimension == null ? "" : dimension.getVersion())
+                        .qput("hash", hash32 == null ? "" : Long.toHexString(hash32)))
+                .qput("mantle", new KMap<>()
+                        .qput("idle", mantle.getAdjustedIdleDuration())
+                        .qput("loaded", mantle.getLoadedRegionCount())
+                        .qput("queued", mantle.getUnloadRegionCount()));
     }
 }

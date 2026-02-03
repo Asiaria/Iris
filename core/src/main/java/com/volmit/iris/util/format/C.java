@@ -20,6 +20,7 @@ package com.volmit.iris.util.format;
 
 import com.volmit.iris.Iris;
 import com.volmit.iris.util.plugin.VolmitSender;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.TextComponent;
 import org.apache.commons.lang.Validate;
@@ -376,6 +377,28 @@ public enum C {
         return "#" + Integer.toHexString(spin(color.awtColor(), h, s, b).getRGB()).substring(2);
     }
 
+    public static String mini(String s) {
+        String msg = compress(s);
+        StringBuilder b = new StringBuilder();
+        boolean c = false;
+
+        for (char i : msg.toCharArray()) {
+            if (!c) {
+                if (i == C.COLOR_CHAR) {
+                    c = true;
+                    continue;
+                }
+                b.append(i);
+            } else {
+                c = false;
+                C o = C.getByChar(i);
+                b.append(o.token);
+            }
+        }
+
+        return b.toString();
+    }
+
     public static String aura(String s, int hrad, int srad, int vrad) {
         return aura(s, hrad, srad, vrad, 0.3D);
     }
@@ -471,6 +494,14 @@ public enum C {
         }
 
         return STRIP_COLOR_PATTERN.matcher(input).replaceAll("");
+    }
+
+    public static String strip(final String input) {
+        if (input == null) {
+            return null;
+        }
+
+        return MiniMessage.miniMessage().stripTags(stripColor(input));
     }
 
     /**

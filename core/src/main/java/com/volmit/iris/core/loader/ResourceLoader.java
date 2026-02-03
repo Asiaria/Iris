@@ -23,6 +23,7 @@ import com.volmit.iris.Iris;
 import com.volmit.iris.core.IrisSettings;
 import com.volmit.iris.core.project.SchemaBuilder;
 import com.volmit.iris.core.service.PreservationSVC;
+import com.volmit.iris.engine.data.cache.AtomicCache;
 import com.volmit.iris.engine.framework.Engine;
 import com.volmit.iris.engine.framework.MeteredCache;
 import com.volmit.iris.util.collection.KList;
@@ -44,9 +45,10 @@ import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
 import java.io.*;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -59,7 +61,7 @@ import java.util.zip.GZIPOutputStream;
 public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
     public static final AtomicDouble tlt = new AtomicDouble(0);
     private static final int CACHE_SIZE = 100000;
-    protected final AtomicReference<KList<File>> folderCache;
+    protected final AtomicCache<KList<File>> folderCache;
     protected KSet<String> firstAccess;
     protected File root;
     protected String folderName;
@@ -75,7 +77,7 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
     public ResourceLoader(File root, IrisData manager, String folderName, String resourceTypeName, Class<? extends T> objectClass) {
         this.manager = manager;
         firstAccess = new KSet<>();
-        folderCache = new AtomicReference<>();
+        folderCache = new AtomicCache<>();
         sec = new ChronoLatch(5000);
         loads = new AtomicInteger();
         this.objectClass = objectClass;
@@ -169,7 +171,6 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
             return possibleKeys;
         }
 
-        KSet<String> m = new KSet<>();
         KList<File> files = getFolders();
 
         if (files == null) {
@@ -177,6 +178,7 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
             return possibleKeys;
         }
 
+        HashSet<String> m = new HashSet<>();
         for (File i : files) {
             for (File j : matchAllFiles(i, (f) -> f.getName().endsWith(".json"))) {
                 m.add(i.toURI().relativize(j.toURI()).getPath().replaceAll("\\Q.json\\E", ""));
@@ -215,6 +217,10 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
         return j;
     }
 
+    public Stream<T> streamAll() {
+        return streamAll(Arrays.stream(getPossibleKeys()));
+    }
+
     public Stream<T> streamAll(Stream<String> s) {
         return s.map(this::load);
     }
@@ -235,13 +241,15 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
 
     public KList<T> loadAllParallel(KList<String> s) {
         KList<T> m = new KList<>();
-        BurstExecutor burst = MultiBurst.burst.burst(s.size());
+        BurstExecutor burst = MultiBurst.ioBurst.burst(s.size());
 
         for (String i : s) {
             burst.queue(() -> {
                 T t = load(i);
+                if (t == null)
+                    return;
 
-                if (t != null) {
+                synchronized (m) {
                     m.add(t);
                 }
             });
@@ -312,7 +320,8 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
             return null;
         }
 
-        firstAccess.add(name);
+        var set = firstAccess;
+        if (set != null) firstAccess.add(name);
         return loadCache.get(name);
     }
 
@@ -335,21 +344,24 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
         }
 
         din.close();
-        file.deleteOnExit();
         Iris.info("Loading " + s.size() + " prefetch " + getFolderName());
+        firstAccess = null;
         loadAllParallel(s);
     }
 
     public void saveFirstAccess(Engine engine) throws IOException {
+        if (firstAccess == null) return;
         String id = "DIM" + Math.abs(engine.getSeedManager().getSeed() + engine.getDimension().getVersion() + engine.getDimension().getLoadKey().hashCode());
         File file = Iris.instance.getDataFile("prefetch/" + id + "/" + Math.abs(getFolderName().hashCode()) + ".ipfch");
         file.getParentFile().mkdirs();
         FileOutputStream fos = new FileOutputStream(file);
         GZIPOutputStream gzo = new CustomOutputStream(fos, 9);
         DataOutputStream dos = new DataOutputStream(gzo);
-        dos.writeInt(firstAccess.size());
+        var set = firstAccess;
+        firstAccess = null;
+        dos.writeInt(set.size());
 
-        for (String i : firstAccess) {
+        for (String i : set) {
             dos.writeUTF(i);
         }
 
@@ -358,29 +370,24 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
     }
 
     public KList<File> getFolders() {
-        synchronized (folderCache) {
-            if (folderCache.get() == null) {
-                KList<File> fc = new KList<>();
+        return folderCache.aquire(() -> {
+            KList<File> fc = new KList<>();
 
-                File[] files = root.listFiles();
-                if (files == null) {
-                    throw new IllegalStateException("Failed to list files in " + root);
-                }
+            File[] files = root.listFiles();
+            if (files == null) {
+                throw new IllegalStateException("Failed to list files in " + root);
+            }
 
-                for (File i : files) {
-                    if (i.isDirectory()) {
-                        if (i.getName().equals(folderName)) {
-                            fc.add(i);
-                            break;
-                        }
+            for (File i : files) {
+                if (i.isDirectory()) {
+                    if (i.getName().equals(folderName)) {
+                        fc.add(i);
+                        break;
                     }
                 }
-
-                folderCache.set(fc);
             }
-        }
-
-        return folderCache.get();
+            return fc;
+        });
     }
 
     public KList<File> getFolders(String rc) {
@@ -400,7 +407,7 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
     public void clearCache() {
         possibleKeys = null;
         loadCache.invalidate();
-        folderCache.set(null);
+        folderCache.reset();
     }
 
     public File fileFor(T b) {
@@ -426,7 +433,7 @@ public class ResourceLoader<T extends IrisRegistrant> implements MeteredCache {
     }
 
     public void clearList() {
-        folderCache.set(null);
+        folderCache.reset();
         possibleKeys = null;
     }
 

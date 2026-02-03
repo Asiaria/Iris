@@ -20,55 +20,80 @@ package com.volmit.iris.util.parallel;
 
 import com.volmit.iris.Iris;
 import com.volmit.iris.core.IrisSettings;
-import com.volmit.iris.core.service.PreservationSVC;
 import com.volmit.iris.util.collection.KList;
 import com.volmit.iris.util.math.M;
 import com.volmit.iris.util.scheduling.PrecisionStopwatch;
+import kotlinx.coroutines.CoroutineDispatcher;
+import kotlinx.coroutines.ExecutorsKt;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.IntSupplier;
 
 public class MultiBurst implements ExecutorService {
     private static final long TIMEOUT = Long.getLong("iris.burst.timeout", 15000);
     public static final MultiBurst burst = new MultiBurst();
+    public static final MultiBurst ioBurst = new MultiBurst("Iris IO", () -> IrisSettings.get().getConcurrency().getIoParallelism());
     private final AtomicLong last;
     private final String name;
     private final int priority;
-    private ExecutorService service;
+    private final IntSupplier parallelism;
+    private final Object lock = new Object();
+    private volatile ExecutorService service;
+    private volatile CoroutineDispatcher dispatcher;
 
     public MultiBurst() {
-        this("Iris", Thread.MIN_PRIORITY);
+        this("Iris");
     }
 
-    public MultiBurst(String name, int priority) {
+    public MultiBurst(String name) {
+        this(name, Thread.MIN_PRIORITY, () -> IrisSettings.get().getConcurrency().getParallelism());
+    }
+
+    public MultiBurst(String name, IntSupplier parallelism) {
+        this(name, Thread.MIN_PRIORITY, parallelism);
+    }
+
+    public MultiBurst(String name, int priority, IntSupplier parallelism) {
         this.name = name;
         this.priority = priority;
+        this.parallelism = parallelism;
         last = new AtomicLong(M.ms());
-        Iris.service(PreservationSVC.class).register(this);
     }
 
-    private synchronized ExecutorService getService() {
+    private ExecutorService getService() {
         last.set(M.ms());
-        if (service == null || service.isShutdown()) {
-            service = new ForkJoinPool(IrisSettings.getThreadCount(IrisSettings.get().getConcurrency().getParallelism()),
-                    new ForkJoinPool.ForkJoinWorkerThreadFactory() {
-                        int m = 0;
+        if (service != null && !service.isShutdown())
+            return service;
 
-                        @Override
-                        public ForkJoinWorkerThread newThread(ForkJoinPool pool) {
-                            final ForkJoinWorkerThread worker = ForkJoinPool.defaultForkJoinWorkerThreadFactory.newThread(pool);
-                            worker.setPriority(priority);
-                            worker.setName(name + " " + ++m);
-                            return worker;
-                        }
-                    },
-                    (t, e) -> e.printStackTrace(), true);
+        synchronized (lock) {
+            if (service != null && !service.isShutdown())
+                return service;
+
+            service = new ForkJoinPool(IrisSettings.getThreadCount(parallelism.getAsInt()),
+                            new ForkJoinPool.ForkJoinWorkerThreadFactory() {
+                                int m = 0;
+
+                                @Override
+                                public ForkJoinWorkerThread newThread(ForkJoinPool pool) {
+                                    final ForkJoinWorkerThread worker = ForkJoinPool.defaultForkJoinWorkerThreadFactory.newThread(pool);
+                                    worker.setPriority(priority);
+                                    worker.setName(name + " " + ++m);
+                                    return worker;
+                                }
+                            },
+                            (t, e) -> e.printStackTrace(), true);
+            dispatcher = ExecutorsKt.from(service);
+            return service;
         }
+    }
 
-        return service;
+    public CoroutineDispatcher getDispatcher() {
+        getService();
+        return dispatcher;
     }
 
     public void burst(Runnable... r) {
@@ -145,6 +170,18 @@ public class MultiBurst implements ExecutorService {
 
     public <T> Future<T> completeValue(Callable<T> o) {
         return getService().submit(o);
+    }
+
+    public <T> CompletableFuture<T> completableFuture(Callable<T> o) {
+        CompletableFuture<T> f = new CompletableFuture<>();
+        getService().submit(() -> {
+            try {
+                f.complete(o.call());
+            } catch (Exception e) {
+                f.completeExceptionally(e);
+            }
+        });
+        return f;
     }
 
     @Override

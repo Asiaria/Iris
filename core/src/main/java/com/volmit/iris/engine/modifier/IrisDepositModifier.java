@@ -25,9 +25,12 @@ import com.volmit.iris.util.context.ChunkContext;
 import com.volmit.iris.util.data.B;
 import com.volmit.iris.util.data.HeightMap;
 import com.volmit.iris.util.hunk.Hunk;
+import com.volmit.iris.util.mantle.MantleChunk;
 import com.volmit.iris.util.math.RNG;
+import com.volmit.iris.util.matter.MatterCavern;
 import com.volmit.iris.util.parallel.BurstExecutor;
 import com.volmit.iris.util.scheduling.PrecisionStopwatch;
+import org.bukkit.Material;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.util.BlockVector;
 
@@ -52,25 +55,31 @@ public class IrisDepositModifier extends EngineAssignedModifier<BlockData> {
         BurstExecutor burst = burst().burst(multicore);
 
         long seed = x * 341873128712L + z * 132897987541L;
+        long mask = 0;
+        MantleChunk chunk = getEngine().getMantle().getMantle().getChunk(x, z).use();
         for (IrisDepositGenerator k : getDimension().getDeposits()) {
-            burst.queue(() -> generate(k, terrain, rng.nextParallelRNG(seed), x, z, false, context));
+            long finalSeed = seed * ++mask;
+            burst.queue(() -> generate(k, chunk, terrain, rng.nextParallelRNG(finalSeed), x, z, false, context));
         }
 
         for (IrisDepositGenerator k : region.getDeposits()) {
-            burst.queue(() -> generate(k, terrain, rng.nextParallelRNG(seed), x, z, false, context));
+            long finalSeed = seed * ++mask;
+            burst.queue(() -> generate(k, chunk, terrain, rng.nextParallelRNG(finalSeed), x, z, false, context));
         }
 
         for (IrisDepositGenerator k : biome.getDeposits()) {
-            burst.queue(() -> generate(k, terrain, rng.nextParallelRNG(seed), x, z, false, context));
+            long finalSeed = seed * ++mask;
+            burst.queue(() -> generate(k, chunk, terrain, rng.nextParallelRNG(finalSeed), x, z, false, context));
         }
         burst.complete();
+        chunk.release();
     }
 
-    public void generate(IrisDepositGenerator k, Hunk<BlockData> data, RNG rng, int cx, int cz, boolean safe, ChunkContext context) {
-        generate(k, data, rng, cx, cz, safe, null, context);
+    public void generate(IrisDepositGenerator k, MantleChunk chunk, Hunk<BlockData> data, RNG rng, int cx, int cz, boolean safe, ChunkContext context) {
+        generate(k, chunk, data, rng, cx, cz, safe, null, context);
     }
 
-    public void generate(IrisDepositGenerator k, Hunk<BlockData> data, RNG rng, int cx, int cz, boolean safe, HeightMap he, ChunkContext context) {
+    public void generate(IrisDepositGenerator k, MantleChunk chunk, Hunk<BlockData> data, RNG rng, int cx, int cz, boolean safe, HeightMap he, ChunkContext context) {
         if (k.getSpawnChance() < rng.d())
             return;
 
@@ -78,7 +87,7 @@ public class IrisDepositModifier extends EngineAssignedModifier<BlockData> {
             if (k.getPerClumpSpawnChance() < rng.d())
                 continue;
 
-            IrisObject clump = k.getClump(rng, getData());
+            IrisObject clump = k.getClump(getEngine(), rng, getData());
 
             int dim = clump.getW();
             int min = dim / 2;
@@ -110,7 +119,7 @@ public class IrisDepositModifier extends EngineAssignedModifier<BlockData> {
             if (y > k.getMaxHeight() || y < k.getMinHeight() || y > height - 2)
                 continue;
 
-            for (BlockVector j : clump.getBlocks().keySet()) {
+            for (BlockVector j : clump.getBlocks().keys()) {
                 int nx = j.getBlockX() + x;
                 int ny = j.getBlockY() + y;
                 int nz = j.getBlockZ() + z;
@@ -118,8 +127,11 @@ public class IrisDepositModifier extends EngineAssignedModifier<BlockData> {
                 if (ny > height || nx > 15 || nx < 0 || ny > getEngine().getHeight() || ny < 0 || nz < 0 || nz > 15) {
                     continue;
                 }
+                if (!k.isReplaceBedrock() && data.get(nx, ny, nz).getMaterial() == Material.BEDROCK) {
+                    continue;
+                }
 
-                if (!getEngine().getMantle().isCarved((cx << 4) + nx, ny, (cz << 4) + nz)) {
+                if (chunk.get(nx, ny, nz, MatterCavern.class) == null) {
                     data.set(nx, ny, nz, B.toDeepSlateOre(data.get(nx, ny, nz), clump.getBlocks().get(j)));
                 }
             }

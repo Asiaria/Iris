@@ -18,10 +18,13 @@
 
 package com.volmit.iris.core.nms;
 
-import com.volmit.iris.core.nms.container.AutoClosing;
+import com.volmit.iris.core.link.Identifier;
 import com.volmit.iris.core.nms.container.BiomeColor;
+import com.volmit.iris.core.nms.container.BlockProperty;
+import com.volmit.iris.core.nms.container.StructurePlacement;
 import com.volmit.iris.core.nms.datapack.DataVersion;
 import com.volmit.iris.engine.framework.Engine;
+import com.volmit.iris.engine.platform.PlatformChunkGenerator;
 import com.volmit.iris.util.collection.KList;
 import com.volmit.iris.util.collection.KMap;
 import com.volmit.iris.util.mantle.Mantle;
@@ -38,6 +41,7 @@ import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.ItemStack;
 
 import java.awt.Color;
+import java.util.List;
 
 public interface INMSBinding {
     boolean hasTile(Material material);
@@ -89,13 +93,10 @@ public interface INMSBinding {
     MCABiomeContainer newBiomeContainer(int min, int max);
 
     default World createWorld(WorldCreator c) {
-        if (missingDimensionTypes(true, true, true))
-            throw new IllegalStateException("Missing dimenstion types to create world");
-
-        try (var ignored = injectLevelStems()) {
-            ignored.storeContext();
-            return c.createWorld();
-        }
+        if (c.generator() instanceof PlatformChunkGenerator gen
+                && missingDimensionTypes(gen.getTarget().getDimension().getDimensionTypeKey()))
+            throw new IllegalStateException("Missing dimension types to create world");
+        return c.createWorld();
     }
 
     int countCustomBiomes();
@@ -121,7 +122,7 @@ public interface INMSBinding {
     Color getBiomeColor(Location location, BiomeColor type);
 
     default DataVersion getDataVersion() {
-        return DataVersion.V1192;
+        return DataVersion.V1_19_2;
     }
 
     default int getSpawnChunkCount(World world) {
@@ -130,13 +131,15 @@ public interface INMSBinding {
 
     KList<String> getStructureKeys();
 
-    AutoClosing injectLevelStems();
+    boolean missingDimensionTypes(String... keys);
 
-    default AutoClosing injectUncached(boolean overworld, boolean nether, boolean end) {
-        return null;
+    default boolean injectBukkit() {
+        return true;
     }
 
-    boolean missingDimensionTypes(boolean overworld, boolean nether, boolean end);
+    KMap<Material, List<BlockProperty>> getBlockProperties();
 
-    void removeCustomDimensions(World world);
+    void placeStructures(Chunk chunk);
+
+    KMap<Identifier, StructurePlacement> collectStructures();
 }

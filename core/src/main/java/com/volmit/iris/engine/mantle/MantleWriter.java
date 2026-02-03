@@ -29,48 +29,61 @@ import com.volmit.iris.engine.object.IrisPosition;
 import com.volmit.iris.engine.object.TileData;
 import com.volmit.iris.util.collection.KMap;
 import com.volmit.iris.util.collection.KSet;
+import com.volmit.iris.util.data.B;
 import com.volmit.iris.util.data.IrisCustomData;
+import com.volmit.iris.util.documentation.ChunkCoordinates;
 import com.volmit.iris.util.function.Function3;
 import com.volmit.iris.util.mantle.Mantle;
 import com.volmit.iris.util.mantle.MantleChunk;
 import com.volmit.iris.util.math.RNG;
 import com.volmit.iris.util.matter.Matter;
+import com.volmit.iris.util.matter.MatterCavern;
+import com.volmit.iris.util.matter.TileWrapper;
+import com.volmit.iris.util.noise.CNG;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import lombok.Data;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.util.Vector;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
+
+import static com.volmit.iris.engine.mantle.EngineMantle.AIR;
 
 @Data
 public class MantleWriter implements IObjectPlacer, AutoCloseable {
     private final EngineMantle engineMantle;
     private final Mantle mantle;
-    private final KMap<Long, MantleChunk> cachedChunks;
+    private final Map<Long, MantleChunk> cachedChunks;
     private final int radius;
     private final int x;
     private final int z;
 
-    public MantleWriter(EngineMantle engineMantle, Mantle mantle, int x, int z, int radius) {
+    public MantleWriter(EngineMantle engineMantle, Mantle mantle, int x, int z, int radius, boolean multicore) {
         this.engineMantle = engineMantle;
         this.mantle = mantle;
-        this.cachedChunks = new KMap<>();
-        this.radius = radius;
+        this.radius = radius * 2;
+        final int d = this.radius + 1;
+        this.cachedChunks = multicore ? new KMap<>(d * d, 0.75f, Math.max(32, Runtime.getRuntime().availableProcessors() * 4)) : new Long2ObjectOpenHashMap<>(d * d);
         this.x = x;
         this.z = z;
 
-        int r = radius / 4;
-        for (int i = -r; i <= r; i++) {
-            for (int j = -r; j <= r; j++) {
-                cachedChunks.put(Cache.key(i + x, j + z), mantle.getChunk(i + x, j + z).use());
-            }
-        }
+        final int parallelism = multicore ? Runtime.getRuntime().availableProcessors() / 2 : 4;
+        final var map = multicore ? cachedChunks : new KMap<Long, MantleChunk>(d * d, 1f, parallelism);
+        mantle.getChunks(
+                x - radius,
+                x + radius,
+                z - radius,
+                z + radius,
+                parallelism,
+                (i, j, c) -> map.put(Cache.key(i, j), c.use())
+        );
+        if (!multicore) cachedChunks.putAll(map);
     }
 
     private static Set<IrisPosition> getBallooned(Set<IrisPosition> vset, double radius) {
         Set<IrisPosition> returnset = new HashSet<>();
         int ceilrad = (int) Math.ceil(radius);
+        double r2 = Math.pow(radius, 2);
 
         for (IrisPosition v : vset) {
             int tipx = v.getX();
@@ -80,7 +93,7 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
             for (int loopx = tipx - ceilrad; loopx <= tipx + ceilrad; loopx++) {
                 for (int loopy = tipy - ceilrad; loopy <= tipy + ceilrad; loopy++) {
                     for (int loopz = tipz - ceilrad; loopz <= tipz + ceilrad; loopz++) {
-                        if (hypot(loopx - tipx, loopy - tipy, loopz - tipz) <= radius) {
+                        if (hypot(loopx - tipx, loopy - tipy, loopz - tipz) <= r2) {
                             returnset.add(new IrisPosition(loopx, loopy, loopz));
                         }
                     }
@@ -113,7 +126,7 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
         for (double d : pars) {
             sum += Math.pow(d, 2);
         }
-        return Math.sqrt(sum);
+        return sum;
     }
 
     private static double lengthSq(double x, double y, double z) {
@@ -142,20 +155,46 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
             return;
         }
 
-        if (cx >= this.x - radius && cx <= this.x + radius
-                && cz >= this.z - radius && cz <= this.z + radius) {
-            MantleChunk chunk = cachedChunks.computeIfAbsent(Cache.key(cx, cz), k -> mantle.getChunk(cx, cz).use());
+        MantleChunk chunk = acquireChunk(cx, cz);
+        if (chunk == null) return;
 
-            if (chunk == null) {
-                Iris.error("Mantle Writer Accessed " + cx + "," + cz + " and came up null (and yet within bounds!)");
-                return;
-            }
+        Matter matter = chunk.getOrCreate(y >> 4);
+        matter.slice(matter.getClass(t)).set(x & 15, y & 15, z & 15, t);
+    }
 
-            Matter matter = chunk.getOrCreate(y >> 4);
-            matter.slice(matter.getClass(t)).set(x & 15, y & 15, z & 15, t);
-        } else {
-            Iris.error("Mantle Writer Accessed chunk out of bounds" + cx + "," + cz);
+    public <T> T getData(int x, int y, int z, Class<T> type) {
+        int cx = x >> 4;
+        int cz = z >> 4;
+
+        if (y < 0 || y >= mantle.getWorldHeight()) {
+            return null;
         }
+
+        MantleChunk chunk = acquireChunk(cx, cz);
+        if (chunk == null) {
+            return null;
+        }
+
+        return chunk.getOrCreate(y >> 4)
+                .<T>slice(type)
+                .get(x & 15, y & 15, z & 15);
+    }
+
+    @ChunkCoordinates
+    public MantleChunk acquireChunk(int cx, int cz) {
+        if (cx < this.x - radius || cx > this.x + radius
+                || cz < this.z - radius || cz > this.z + radius) {
+            Iris.error("Mantle Writer Accessed chunk out of bounds" + cx + "," + cz);
+            return null;
+        }
+        final Long key = Cache.key(cx, cz);
+        MantleChunk chunk = cachedChunks.get(key);
+        if (chunk == null) {
+            chunk = mantle.getChunk(cx, cz).use();
+            var old = cachedChunks.put(key, chunk);
+            if (old != null) old.release();
+        }
+        return chunk;
     }
 
     @Override
@@ -178,7 +217,10 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
 
     @Override
     public BlockData get(int x, int y, int z) {
-        return getEngineMantle().get(x, y, z);
+        BlockData block = getData(x, y, z, BlockData.class);
+        if (block == null)
+            return AIR;
+        return block;
     }
 
     @Override
@@ -188,12 +230,12 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
 
     @Override
     public boolean isCarved(int x, int y, int z) {
-        return getEngineMantle().isCarved(x, y, z);
+        return getData(x, y, z, MatterCavern.class) != null;
     }
 
     @Override
     public boolean isSolid(int x, int y, int z) {
-        return getEngineMantle().isSolid(x, y, z);
+        return B.isSolid(get(x, y, z));
     }
 
     @Override
@@ -213,7 +255,7 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
 
     @Override
     public void setTile(int xx, int yy, int zz, TileData tile) {
-        getEngineMantle().setTile(xx, yy, zz, tile);
+        setData(xx, yy, zz, new TileWrapper(tile));
     }
 
     @Override
@@ -453,6 +495,62 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
      * @param <T>     the type of data to apply to the mantle
      */
     public <T> void setLineConsumer(List<IrisPosition> vectors, double radius, boolean filled, Function3<Integer, Integer, Integer, T> data) {
+        Set<IrisPosition> vset = cleanup(vectors);
+        vset = getBallooned(vset, radius);
+
+        if (!filled) {
+            vset = getHollowed(vset);
+        }
+
+        setConsumer(vset, data);
+    }
+
+    /**
+     * Set lines for points
+     *
+     * @param vectors the points
+     * @param radius  the radius
+     * @param filled  hollow or filled?
+     * @param data    the data to set
+     * @param <T>     the type of data to apply to the mantle
+     */
+    public <T> void setNoiseMasked(List<IrisPosition> vectors, double radius, double threshold, CNG shape, Set<IrisPosition> masks, boolean filled, Function3<Integer, Integer, Integer, T> data) {
+        Set<IrisPosition> vset = cleanup(vectors);
+        vset = masks == null ? getBallooned(vset, radius) : getMasked(vset, masks, radius);
+        vset.removeIf(p -> shape.noise(p.getX(), p.getY(), p.getZ()) < threshold);
+
+        if (!filled) {
+            vset = getHollowed(vset);
+        }
+
+        setConsumer(vset, data);
+    }
+
+    private static Set<IrisPosition> getMasked(Set<IrisPosition> vectors, Set<IrisPosition> masks, double radius) {
+        Set<IrisPosition> vset = new KSet<>();
+        int ceil = (int) Math.ceil(radius);
+        double r2 = Math.pow(radius, 2);
+
+        for (IrisPosition v : vectors) {
+            int tipX = v.getX();
+            int tipY = v.getY();
+            int tipZ = v.getZ();
+
+            for (int x = -ceil; x <= ceil; x++) {
+                for (int y = -ceil; y <= ceil; y++) {
+                    for (int z = -ceil; z <= ceil; z++) {
+                        if (hypot(x, y, z) > r2 || !masks.contains(new IrisPosition(x, y, z)))
+                            continue;
+                        vset.add(new IrisPosition(tipX + x, tipY + y, tipZ + z));
+                    }
+                }
+            }
+        }
+
+        return vset;
+    }
+
+    private static Set<IrisPosition> cleanup(List<IrisPosition> vectors) {
         Set<IrisPosition> vset = new KSet<>();
 
         for (int i = 0; vectors.size() != 0 && i < vectors.size() - 1; i++) {
@@ -504,13 +602,7 @@ public class MantleWriter implements IObjectPlacer, AutoCloseable {
             }
         }
 
-        vset = getBallooned(vset, radius);
-
-        if (!filled) {
-            vset = getHollowed(vset);
-        }
-
-        setConsumer(vset, data);
+        return vset;
     }
 
     /**

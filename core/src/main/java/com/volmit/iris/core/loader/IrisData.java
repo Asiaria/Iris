@@ -24,6 +24,7 @@ import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
 import com.google.gson.stream.JsonWriter;
 import com.volmit.iris.Iris;
+import com.volmit.iris.core.scripting.environment.PackEnvironment;
 import com.volmit.iris.engine.data.cache.AtomicCache;
 import com.volmit.iris.engine.framework.Engine;
 import com.volmit.iris.engine.object.*;
@@ -33,19 +34,23 @@ import com.volmit.iris.util.collection.KList;
 import com.volmit.iris.util.collection.KMap;
 import com.volmit.iris.util.context.IrisContext;
 import com.volmit.iris.util.format.C;
+import com.volmit.iris.util.mantle.flag.MantleFlagAdapter;
+import com.volmit.iris.util.mantle.flag.MantleFlag;
 import com.volmit.iris.util.math.RNG;
 import com.volmit.iris.util.parallel.BurstExecutor;
 import com.volmit.iris.util.parallel.MultiBurst;
-import com.volmit.iris.util.reflect.OldEnum;
+import com.volmit.iris.util.reflect.KeyedType;
 import com.volmit.iris.util.scheduling.ChronoLatch;
 import com.volmit.iris.util.scheduling.J;
 import lombok.Data;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
-import java.util.Objects;
-import java.util.function.Function;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
 
 @Data
 public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
@@ -53,6 +58,7 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
     private final File dataFolder;
     private final int id;
     private boolean closed = false;
+    private PackEnvironment environment;
     private ResourceLoader<IrisBiome> biomeLoader;
     private ResourceLoader<IrisLootTable> lootLoader;
     private ResourceLoader<IrisRegion> regionLoader;
@@ -92,8 +98,12 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
         return dataLoaders.computeIfAbsent(dataFolder, IrisData::new);
     }
 
+    public static Optional<IrisData> getLoaded(File dataFolder) {
+        return Optional.ofNullable(dataLoaders.get(dataFolder));
+    }
+
     public static void dereference() {
-        dataLoaders.v().forEach(IrisData::cleanupEngine);
+        dataLoaders.values().forEach(IrisData::cleanupEngine);
     }
 
     public static int cacheSize() {
@@ -111,92 +121,100 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
         Iris.warn("  " + rl.getResourceTypeName() + " @ /" + rl.getFolderName() + ": Cache=" + rl.getLoadCache().getSize() + " Folders=" + rl.getFolders().size());
     }
 
-    public static IrisObject loadAnyObject(String key) {
-        return loadAny(key, (dm) -> dm.getObjectLoader().load(key, false));
+    public static IrisObject loadAnyObject(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisObject.class, key, nearest);
     }
 
-    public static IrisMatterObject loadAnyMatter(String key) {
-        return loadAny(key, (dm) -> dm.getMatterLoader().load(key, false));
+    public static IrisMatterObject loadAnyMatter(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisMatterObject.class, key, nearest);
     }
 
-    public static IrisBiome loadAnyBiome(String key) {
-        return loadAny(key, (dm) -> dm.getBiomeLoader().load(key, false));
+    public static IrisBiome loadAnyBiome(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisBiome.class, key, nearest);
     }
 
-    public static IrisExpression loadAnyExpression(String key) {
-        return loadAny(key, (dm) -> dm.getExpressionLoader().load(key, false));
+    public static IrisExpression loadAnyExpression(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisExpression.class, key, nearest);
     }
 
-    public static IrisMod loadAnyMod(String key) {
-        return loadAny(key, (dm) -> dm.getModLoader().load(key, false));
+    public static IrisMod loadAnyMod(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisMod.class, key, nearest);
     }
 
-    public static IrisJigsawPiece loadAnyJigsawPiece(String key) {
-        return loadAny(key, (dm) -> dm.getJigsawPieceLoader().load(key, false));
+    public static IrisJigsawPiece loadAnyJigsawPiece(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisJigsawPiece.class, key, nearest);
     }
 
-    public static IrisJigsawPool loadAnyJigsawPool(String key) {
-        return loadAny(key, (dm) -> dm.getJigsawPoolLoader().load(key, false));
+    public static IrisJigsawPool loadAnyJigsawPool(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisJigsawPool.class, key, nearest);
     }
 
-    public static IrisEntity loadAnyEntity(String key) {
-        return loadAny(key, (dm) -> dm.getEntityLoader().load(key, false));
+    public static IrisEntity loadAnyEntity(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisEntity.class, key, nearest);
     }
 
-    public static IrisLootTable loadAnyLootTable(String key) {
-        return loadAny(key, (dm) -> dm.getLootLoader().load(key, false));
+    public static IrisLootTable loadAnyLootTable(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisLootTable.class, key, nearest);
     }
 
-    public static IrisBlockData loadAnyBlock(String key) {
-        return loadAny(key, (dm) -> dm.getBlockLoader().load(key, false));
+    public static IrisBlockData loadAnyBlock(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisBlockData.class, key, nearest);
     }
 
-    public static IrisSpawner loadAnySpaner(String key) {
-        return loadAny(key, (dm) -> dm.getSpawnerLoader().load(key, false));
+    public static IrisSpawner loadAnySpaner(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisSpawner.class, key, nearest);
     }
 
-    public static IrisScript loadAnyScript(String key) {
-        return loadAny(key, (dm) -> dm.getScriptLoader().load(key, false));
+    public static IrisScript loadAnyScript(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisScript.class, key, nearest);
     }
 
-    public static IrisRavine loadAnyRavine(String key) {
-        return loadAny(key, (dm) -> dm.getRavineLoader().load(key, false));
+    public static IrisRavine loadAnyRavine(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisRavine.class, key, nearest);
     }
 
-    public static IrisRegion loadAnyRegion(String key) {
-        return loadAny(key, (dm) -> dm.getRegionLoader().load(key, false));
+    public static IrisRegion loadAnyRegion(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisRegion.class, key, nearest);
     }
 
-    public static IrisMarker loadAnyMarker(String key) {
-        return loadAny(key, (dm) -> dm.getMarkerLoader().load(key, false));
+    public static IrisMarker loadAnyMarker(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisMarker.class, key, nearest);
     }
 
-    public static IrisCave loadAnyCave(String key) {
-        return loadAny(key, (dm) -> dm.getCaveLoader().load(key, false));
+    public static IrisCave loadAnyCave(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisCave.class, key, nearest);
     }
 
-    public static IrisImage loadAnyImage(String key) {
-        return loadAny(key, (dm) -> dm.getImageLoader().load(key, false));
+    public static IrisImage loadAnyImage(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisImage.class, key, nearest);
     }
 
-    public static IrisDimension loadAnyDimension(String key) {
-        return loadAny(key, (dm) -> dm.getDimensionLoader().load(key, false));
+    public static IrisDimension loadAnyDimension(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisDimension.class, key, nearest);
     }
 
-    public static IrisJigsawStructure loadAnyJigsawStructure(String key) {
-        return loadAny(key, (dm) -> dm.getJigsawStructureLoader().load(key, false));
+    public static IrisJigsawStructure loadAnyJigsawStructure(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisJigsawStructure.class, key, nearest);
     }
 
-    public static IrisGenerator loadAnyGenerator(String key) {
-        return loadAny(key, (dm) -> dm.getGeneratorLoader().load(key, false));
+    public static IrisGenerator loadAnyGenerator(String key, @Nullable IrisData nearest) {
+        return loadAny(IrisGenerator.class, key, nearest);
     }
 
-    public static <T extends IrisRegistrant> T loadAny(String key, Function<IrisData, T> v) {
+    public static <T extends IrisRegistrant> T loadAny(Class<T> type, String key, @Nullable IrisData nearest) {
         try {
+            if (nearest != null) {
+                T t = nearest.load(type, key, false);
+                if (t != null) {
+                    return t;
+                }
+            }
+
             for (File i : Objects.requireNonNull(Iris.instance.getDataFolder("packs").listFiles())) {
                 if (i.isDirectory()) {
                     IrisData dm = get(i);
-                    T t = v.apply(dm);
+                    if (dm == nearest) continue;
+                    T t = dm.load(type, key, false);
 
                     if (t != null) {
                         return t;
@@ -209,6 +227,17 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
         }
 
         return null;
+    }
+
+    public <T extends IrisRegistrant> T load(Class<T> type, String key, boolean warn) {
+        var loader = getLoader(type);
+        if (loader == null) return null;
+        return loader.load(key, warn);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T extends IrisRegistrant> ResourceLoader<T> getLoader(Class<T> type) {
+        return (ResourceLoader<T>) loaders.get(type);
     }
 
     public ResourceLoader<?> getTypedLoaderFor(File f) {
@@ -250,12 +279,20 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
                 }
             }
 
-            if (engine != null && t.getPreprocessors().isNotEmpty()) {
+            if (engine == null) return;
+            var global = engine.getDimension().getPreProcessors(t.getFolderName());
+            var local = t.getPreprocessors();
+            if ((global != null && global.isNotEmpty()) || local.isNotEmpty()) {
                 synchronized (this) {
-                    engine.getExecution().getAPI().setPreprocessorObject(t);
+                    if (global != null) {
+                        for (String i : global) {
+                            engine.getExecution().preprocessObject(i, t);
+                            Iris.debug("Loader<" + C.GREEN + t.getTypeName() + C.LIGHT_PURPLE + "> iprocess " + C.YELLOW + t.getLoadKey() + C.LIGHT_PURPLE + " in <rainbow>" + i);
+                        }
+                    }
 
-                    for (String i : t.getPreprocessors()) {
-                        engine.getExecution().execute(i);
+                    for (String i : local) {
+                        engine.getExecution().preprocessObject(i, t);
                         Iris.debug("Loader<" + C.GREEN + t.getTypeName() + C.LIGHT_PURPLE + "> iprocess " + C.YELLOW + t.getLoadKey() + C.LIGHT_PURPLE + " in <rainbow>" + i);
                     }
                 }
@@ -269,6 +306,7 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
     public void close() {
         closed = true;
         dump();
+        dataLoaders.remove(dataFolder);
     }
 
     public IrisData copy() {
@@ -309,12 +347,14 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
     }
 
     public synchronized void hotloaded() {
+        closed = false;
         possibleSnippets = new KMap<>();
         builder = new GsonBuilder()
                 .addDeserializationExclusionStrategy(this)
                 .addSerializationExclusionStrategy(this)
                 .setLenient()
                 .registerTypeAdapterFactory(this)
+                .registerTypeAdapter(MantleFlag.class, new MantleFlagAdapter())
                 .setPrettyPrinting();
         loaders.clear();
         File packs = dataFolder;
@@ -339,16 +379,18 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
         this.imageLoader = registerLoader(IrisImage.class);
         this.scriptLoader = registerLoader(IrisScript.class);
         this.matterObjectLoader = registerLoader(IrisMatterObject.class);
-        if (OldEnum.exists()) {
-            builder.registerTypeAdapterFactory(new TypeAdapterFactory() {
-                @Override
-                public <T> TypeAdapter<T> create(Gson gson, TypeToken<T> type) {
-                    return (TypeAdapter<T>) OldEnum.create(type.getRawType());
-                }
-            });
-        }
+        this.environment = PackEnvironment.create(this);
+        builder.registerTypeAdapterFactory(KeyedType::createTypeAdapter);
 
         gson = builder.create();
+        dimensionLoader.streamAll()
+                .map(IrisDimension::getDataScripts)
+                .flatMap(KList::stream)
+                .forEach(environment::execute);
+
+        if (engine != null) {
+            engine.hotload();
+        }
     }
 
     public void dump() {
@@ -361,6 +403,34 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
         for (ResourceLoader<?> i : loaders.values()) {
             i.clearList();
         }
+        possibleSnippets.clear();
+    }
+
+    public Set<Class<?>> resolveSnippets() {
+        var result = new HashSet<Class<?>>();
+        var processed = new HashSet<Class<?>>();
+        var excluder = gson.excluder();
+
+        var queue = new LinkedList<Class<?>>(loaders.keySet());
+        while (!queue.isEmpty()) {
+            var type = queue.poll();
+            if (excluder.excludeClass(type, false) || !processed.add(type))
+                continue;
+            if (type.isAnnotationPresent(Snippet.class))
+                result.add(type);
+
+            try {
+                for (var field : type.getDeclaredFields()) {
+                    if (excluder.excludeField(field, false))
+                        continue;
+
+                    queue.add(field.getType());
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return result;
     }
 
     public String toLoadKey(File f) {
@@ -409,6 +479,7 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
         }
 
         String snippetType = typeToken.getRawType().getDeclaredAnnotation(Snippet.class).value();
+        String snippedBase = "snippet/" + snippetType + "/";
 
         return new TypeAdapter<>() {
             @Override
@@ -422,20 +493,20 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
 
                 if (reader.peek().equals(JsonToken.STRING)) {
                     String r = reader.nextString();
+                    if (!r.startsWith("snippet/"))
+                        return null;
+                    if (!r.startsWith(snippedBase))
+                        r = snippedBase + r.substring(8);
 
-                    if (r.startsWith("snippet/" + snippetType + "/")) {
-                        File f = new File(getDataFolder(), r + ".json");
-
-                        if (f.exists()) {
-                            try {
-                                JsonReader snippetReader = new JsonReader(new FileReader(f));
-                                return adapter.read(snippetReader);
-                            } catch (Throwable e) {
-                                Iris.error("Couldn't read snippet " + r + " in " + reader.getPath() + " (" + e.getMessage() + ")");
-                            }
-                        } else {
-                            Iris.error("Couldn't find snippet " + r + " in " + reader.getPath());
+                    File f = new File(getDataFolder(), r + ".json");
+                    if (f.exists()) {
+                        try (JsonReader snippetReader = new JsonReader(new FileReader(f))){
+                            return adapter.read(snippetReader);
+                        } catch (Throwable e) {
+                            Iris.error("Couldn't read snippet " + r + " in " + reader.getPath() + " (" + e.getMessage() + ")");
                         }
+                    } else {
+                        Iris.error("Couldn't find snippet " + r + " in " + reader.getPath());
                     }
 
                     return null;
@@ -462,11 +533,20 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
             KList<String> l = new KList<>();
 
             File snippetFolder = new File(getDataFolder(), "snippet/" + f);
+            if (!snippetFolder.exists()) return l;
 
-            if (snippetFolder.exists() && snippetFolder.isDirectory()) {
-                for (File i : snippetFolder.listFiles()) {
-                    l.add("snippet/" + f + "/" + i.getName().split("\\Q.\\E")[0]);
-                }
+            String absPath = snippetFolder.getAbsolutePath();
+            try (var stream = Files.walk(snippetFolder.toPath())) {
+                stream.filter(Files::isRegularFile)
+                        .map(Path::toAbsolutePath)
+                        .map(Path::toString)
+                        .filter(s -> s.endsWith(".json"))
+                        .map(s -> s.substring(absPath.length() + 1))
+                        .map(s -> s.replace("\\", "/"))
+                        .map(s -> s.split("\\Q.\\E")[0])
+                        .forEach(s -> l.add("snippet/" + s));
+            } catch (Throwable e) {
+                e.printStackTrace();
             }
 
             return l;
@@ -478,7 +558,7 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
     }
 
     public void savePrefetch(Engine engine) {
-        BurstExecutor b = MultiBurst.burst.burst(loaders.size());
+        BurstExecutor b = MultiBurst.ioBurst.burst(loaders.size());
 
         for (ResourceLoader<?> i : loaders.values()) {
             b.queue(() -> {
@@ -495,7 +575,7 @@ public class IrisData implements ExclusionStrategy, TypeAdapterFactory {
     }
 
     public void loadPrefetch(Engine engine) {
-        BurstExecutor b = MultiBurst.burst.burst(loaders.size());
+        BurstExecutor b = MultiBurst.ioBurst.burst(loaders.size());
 
         for (ResourceLoader<?> i : loaders.values()) {
             b.queue(() -> {

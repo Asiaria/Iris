@@ -24,13 +24,26 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.volmit.iris.Iris;
 import com.volmit.iris.util.format.Form;
+import com.volmit.iris.util.scheduling.J;
 import org.apache.commons.io.function.IOConsumer;
 import org.apache.commons.io.function.IOFunction;
+import lombok.SneakyThrows;
+import org.dom4j.Document;
+import org.dom4j.DocumentHelper;
+import org.dom4j.io.OutputFormat;
+import org.dom4j.io.SAXReader;
+import org.dom4j.io.XMLWriter;
 
 import java.io.*;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -166,6 +179,8 @@ public class IO {
         JsonElement json;
         try (FileReader reader = new FileReader(file)) {
             json = JsonParser.parseReader(reader);
+        } catch (Throwable e) {
+            throw new IOException("Failed to read json file " + file, e);
         }
 
         var queue = new LinkedList<JsonElement>();
@@ -590,6 +605,25 @@ public class IO {
         if (preserveFileDate) {
             destFile.setLastModified(srcFile.lastModified());
         }
+    }
+
+    public static void copyDirectory(Path source, Path target) throws IOException {
+        Files.walk(source).forEach(sourcePath -> {
+            Path targetPath = target.resolve(source.relativize(sourcePath));
+
+            try {
+                if (Files.isDirectory(sourcePath)) {
+                    if (!Files.exists(targetPath)) {
+                        Files.createDirectories(targetPath);
+                    }
+                } else {
+                    Files.copy(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                }
+            } catch (IOException e) {
+                Iris.error("Failed to copy " + targetPath);
+                e.printStackTrace();
+            }
+        });
     }
 
     /**
@@ -1643,18 +1677,48 @@ public class IO {
         return (ch2 == -1);
     }
 
-    public static <T extends OutputStream> void write(File file, IOFunction<FileOutputStream, T> builder, IOConsumer<T> action) throws IOException {
+    @SneakyThrows
+    public static void write(File file, Document doc) {
+        file.getParentFile().mkdirs();
+        try (var writer = new FileWriter(file)) {
+            new XMLWriter(writer, OutputFormat.createPrettyPrint())
+                    .write(doc);
+        }
+    }
+
+    @SneakyThrows
+    public static Document read(File file) {
+        if (file.exists()) return new SAXReader().read(file);
+        var doc = DocumentHelper.createDocument();
+        doc.addElement("project")
+                .addAttribute("version", "4");
+        return doc;
+    }
+
+    public static <T extends Closeable> void write(File file, IOFunction<FileOutputStream, T> builder, IOConsumer<T> action) throws IOException {
         File dir = new File(file.getParentFile(), ".tmp");
         dir.mkdirs();
         dir.deleteOnExit();
         File temp = File.createTempFile("iris",".bin", dir);
-        try {
+        try (var target = FileChannel.open(file.toPath(), StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.SYNC)) {
+            lock(target);
+
             try (var out = builder.apply(new FileOutputStream(temp))) {
                 action.accept(out);
             }
-            Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(temp.toPath(), Channels.newOutputStream(target));
+            target.truncate(temp.length());
         } finally {
             temp.delete();
+        }
+    }
+
+    public static FileLock lock(FileChannel channel) throws IOException {
+        while (true) {
+            try {
+                return channel.lock();
+            } catch (OverlappingFileLockException e) {}
+            J.sleep(1);
         }
     }
 }

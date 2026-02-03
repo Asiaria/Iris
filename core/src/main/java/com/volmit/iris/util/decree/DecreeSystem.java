@@ -133,23 +133,32 @@ public interface DecreeSystem extends CommandExecutor, TabCompleter {
 
     default boolean call(VolmitSender sender, String[] args) {
         DecreeContext.touch(sender);
-        return getRoot().invoke(sender, enhanceArgs(args));
+        try {
+            return getRoot().invoke(sender, enhanceArgs(args));
+        } finally {
+            DecreeContext.remove();
+        }
     }
 
     @Nullable
     @Override
     default List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
-        KList<String> enhanced = new KList<>(args);
-        KList<String> v = getRoot().tabComplete(enhanced, enhanced.toString(" "));
-        v.removeDuplicates();
+        DecreeContext.touch(new VolmitSender(sender));
+        try {
+            KList<String> enhanced = new KList<>(args);
+            KList<String> v = getRoot().tabComplete(enhanced, enhanced.toString(" "));
+            v.removeDuplicates();
 
-        if (sender instanceof Player) {
-            if (IrisSettings.get().getGeneral().isCommandSounds()) {
-                ((Player) sender).playSound(((Player) sender).getLocation(), Sound.BLOCK_AMETHYST_BLOCK_CHIME, 0.25f, RNG.r.f(0.125f, 1.95f));
+            if (sender instanceof Player) {
+                if (IrisSettings.get().getGeneral().isCommandSounds()) {
+                    ((Player) sender).playSound(((Player) sender).getLocation(), Sound.BLOCK_AMETHYST_BLOCK_CHIME, 0.25f, RNG.r.f(0.125f, 1.95f));
+                }
             }
-        }
 
-        return v;
+            return v;
+        } finally {
+            DecreeContext.remove();
+        }
     }
 
     @Override
@@ -160,7 +169,8 @@ public interface DecreeSystem extends CommandExecutor, TabCompleter {
         }
 
         J.aBukkit(() -> {
-            if (!call(new VolmitSender(sender), args)) {
+            var volmit = new VolmitSender(sender);
+            if (!call(volmit, args)) {
 
                 if (IrisSettings.get().getGeneral().isCommandSounds()) {
                     if (sender instanceof Player) {
@@ -169,7 +179,7 @@ public interface DecreeSystem extends CommandExecutor, TabCompleter {
                     }
                 }
 
-                sender.sendMessage(C.RED + "Unknown Iris Command");
+                volmit.sendMessage(C.RED + "Unknown Iris Command");
             } else {
                 if (IrisSettings.get().getGeneral().isCommandSounds()) {
                     if (sender instanceof Player) {

@@ -51,6 +51,7 @@ import org.bukkit.util.Vector;
 
 import java.awt.Color;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 
@@ -80,6 +81,8 @@ public class WandSVC implements IrisService {
 
         try {
             Location[] f = getCuboid(p);
+            if (f == null || f[0] == null || f[1] == null)
+                return null;
             Cuboid c = new Cuboid(f[0], f[1]);
             IrisObject s = new IrisObject(c.getSizeX(), c.getSizeY(), c.getSizeZ());
 
@@ -87,6 +90,7 @@ public class WandSVC implements IrisService {
 
             int total = c.getSizeX() * c.getSizeY() * c.getSizeZ();
             var latch = new CountDownLatch(1);
+            var holder = Iris.tickets.getHolder(p.getWorld());
             new Job() {
                 private int i;
                 private Chunk chunk;
@@ -105,7 +109,7 @@ public class WandSVC implements IrisService {
                             while (time > M.ms()) {
                                 if (!it.hasNext()) {
                                     if (chunk != null) {
-                                        chunk.removePluginChunkTicket(Iris.instance);
+                                        holder.removeTicket(chunk);
                                         chunk = null;
                                     }
 
@@ -119,9 +123,10 @@ public class WandSVC implements IrisService {
                                     var bChunk = b.getChunk();
                                     if (chunk == null) {
                                         chunk = bChunk;
-                                        chunk.addPluginChunkTicket(Iris.instance);
+                                        holder.addTicket(chunk);
                                     } else if (chunk != bChunk) {
-                                        chunk.removePluginChunkTicket(Iris.instance);
+                                        holder.removeTicket(chunk);
+                                        holder.addTicket(bChunk);
                                         chunk = bChunk;
                                     }
 
@@ -198,7 +203,9 @@ public class WandSVC implements IrisService {
     public static Location stringToLocation(String s) {
         try {
             String[] f = s.split("\\Q in \\E");
+            if (f.length != 2) return null;
             String[] g = f[0].split("\\Q,\\E");
+            if (g.length != 3) return null;
             return new Location(Bukkit.getWorld(f[1]), Integer.parseInt(g[0]), Integer.parseInt(g[1]), Integer.parseInt(g[2]));
         } catch (Throwable e) {
             Iris.reportError(e);
@@ -357,6 +364,7 @@ public class WandSVC implements IrisService {
             try {
                 if ((IrisSettings.get().getWorld().worldEditWandCUI && isHoldingWand(p)) || isWand(p.getInventory().getItemInMainHand())) {
                     Location[] d = getCuboid(p);
+                    if (d == null || d[0] == null || d[1] == null) return;
                     new WandSelection(new Cuboid(d[0], d[1]), p).draw();
                 }
             } catch (Throwable e) {

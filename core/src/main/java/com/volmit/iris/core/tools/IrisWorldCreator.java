@@ -21,13 +21,10 @@ package com.volmit.iris.core.tools;
 import com.volmit.iris.core.loader.IrisData;
 import com.volmit.iris.engine.object.*;
 import com.volmit.iris.engine.platform.BukkitChunkGenerator;
-import com.volmit.iris.util.reflect.WrappedField;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
-import org.bukkit.WorldType;
 import org.bukkit.generator.ChunkGenerator;
-import sun.misc.Unsafe;
 
 import java.io.File;
 
@@ -67,7 +64,7 @@ public class IrisWorldCreator {
     }
 
     public WorldCreator create() {
-        IrisDimension dim = IrisData.loadAnyDimension(dimensionName);
+        IrisDimension dim = IrisData.loadAnyDimension(dimensionName, null);
 
         IrisWorld w = IrisWorld.builder()
                 .name(name)
@@ -83,13 +80,13 @@ public class IrisWorldCreator {
 
 
         return new WorldCreator(name)
-                .environment(findEnvironment())
+                .environment(w.environment())
                 .generateStructures(true)
                 .generator(g).seed(seed);
     }
 
     private World.Environment findEnvironment() {
-        IrisDimension dim = IrisData.loadAnyDimension(dimensionName);
+        IrisDimension dim = IrisData.loadAnyDimension(dimensionName, null);
         if (dim == null || dim.getEnvironment() == null) {
             return World.Environment.NORMAL;
         } else {

@@ -49,6 +49,8 @@ import lombok.Data;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.World;
+import org.dom4j.Document;
+import org.dom4j.Element;
 import org.zeroturnaround.zip.ZipUtil;
 
 import java.awt.*;
@@ -156,7 +158,7 @@ public class IrisProject {
 
     public void openVSCode(VolmitSender sender) {
 
-        IrisDimension d = IrisData.loadAnyDimension(getName());
+        IrisDimension d = IrisData.loadAnyDimension(getName(), null);
         J.attemptAsync(() ->
         {
             try {
@@ -217,24 +219,15 @@ public class IrisProject {
             close();
         }
 
-        boolean hasError = false;
-
-        if (hasError) {
-            return;
-        }
-
-        IrisDimension d = IrisData.loadAnyDimension(getName());
-        if (d == null) {
-            sender.sendMessage("Can't find dimension: " + getName());
-            return;
-        } else if (sender.isPlayer()) {
-            sender.player().setGameMode(GameMode.SPECTATOR);
-        }
-
-        openVSCode(sender);
-
-
         J.a(() -> {
+            IrisDimension d = IrisData.loadAnyDimension(getName(), null);
+            if (d == null) {
+                sender.sendMessage("Can't find dimension: " + getName());
+                return;
+            } else if (sender.isPlayer()) {
+                J.s(() -> sender.player().setGameMode(GameMode.SPECTATOR));
+            }
+
             try {
                 activeProvider = (PlatformChunkGenerator) IrisToolbelt.createWorld()
                         .seed(seed)
@@ -247,6 +240,8 @@ public class IrisProject {
             } catch (IrisException e) {
                 e.printStackTrace();
             }
+
+            openVSCode(sender);
         });
     }
 
@@ -330,7 +325,7 @@ public class IrisProject {
             }
         }
 
-        for (Class<?> i : Iris.getClasses("com.volmit.iris.engine.object.", Snippet.class)) {
+        for (Class<?> i : dm.resolveSnippets()) {
             try {
                 String snipType = i.getDeclaredAnnotation(Snippet.class).value();
                 JSONObject o = new JSONObject();
@@ -359,6 +354,74 @@ public class IrisProject {
         settings.put("json.schemas", schemas);
         ws.put("settings", settings);
 
+        dm.getEnvironment().configureProject();
+        File schemasFile = new File(path, ".idea" + File.separator + "jsonSchemas.xml");
+        Document doc = IO.read(schemasFile);
+        Element mappings = (Element) doc.selectSingleNode("//component[@name='JsonSchemaMappingsProjectConfiguration']");
+        if (mappings == null) {
+            mappings = doc.getRootElement()
+                    .addElement("component")
+                    .addAttribute("name", "JsonSchemaMappingsProjectConfiguration");
+        }
+
+        Element state = (Element) mappings.selectSingleNode("state");
+        if (state == null) state = mappings.addElement("state");
+
+        Element map = (Element) state.selectSingleNode("map");
+        if (map == null) map = state.addElement("map");
+        var schemaMap = new KMap<String, String>();
+        schemas.forEach(element -> {
+            if (!(element instanceof JSONObject obj))
+                return;
+
+            String url = obj.getString("url");
+            String dir = obj.getJSONArray("fileMatch").getString(0);
+            schemaMap.put(url, dir.substring(1, dir.indexOf("/*")));
+        });
+
+        map.selectNodes("entry/value/SchemaInfo/option[@name='relativePathToSchema']")
+                .stream()
+                .map(node -> node.valueOf("@value"))
+                .forEach(schemaMap::remove);
+
+        var ideaSchemas = map;
+        schemaMap.forEach((url, dir) -> {
+            var genName = UUID.randomUUID().toString();
+
+            var info = ideaSchemas.addElement("entry")
+                    .addAttribute("key", genName)
+                    .addElement("value")
+                    .addElement("SchemaInfo");
+            info.addElement("option")
+                    .addAttribute("name", "generatedName")
+                    .addAttribute("value", genName);
+            info.addElement("option")
+                    .addAttribute("name", "name")
+                    .addAttribute("value", dir);
+            info.addElement("option")
+                    .addAttribute("name", "relativePathToSchema")
+                    .addAttribute("value", url);
+
+
+            var item = info.addElement("option")
+                    .addAttribute("name", "patterns")
+                    .addElement("list")
+                    .addElement("Item");
+            item.addElement("option")
+                    .addAttribute("name", "directory")
+                    .addAttribute("value", "true");
+            item.addElement("option")
+                    .addAttribute("name", "path")
+                    .addAttribute("value", dir);
+            item.addElement("option")
+                    .addAttribute("name", "mappingKind")
+                    .addAttribute("value", "Directory");
+        });
+        if (!schemaMap.isEmpty()) {
+            IO.write(schemasFile, doc);
+        }
+        Gradle.wrapper(path);
+
         return ws;
     }
 
@@ -377,17 +440,17 @@ public class IrisProject {
         KSet<IrisLootTable> loot = new KSet<>();
         KSet<IrisBlockData> blocks = new KSet<>();
 
-        for (String i : dm.getDimensionLoader().getPossibleKeys()) {
+        for (String i : dm.getBlockLoader().getPossibleKeys()) {
             blocks.add(dm.getBlockLoader().load(i));
         }
 
         dimension.getRegions().forEach((i) -> regions.add(dm.getRegionLoader().load(i)));
         dimension.getLoot().getTables().forEach((i) -> loot.add(dm.getLootLoader().load(i)));
-        regions.forEach((i) -> biomes.addAll(i.getAllBiomes(null)));
+        regions.forEach((i) -> biomes.addAll(i.getAllBiomes(() -> dm)));
         regions.forEach((r) -> r.getLoot().getTables().forEach((i) -> loot.add(dm.getLootLoader().load(i))));
         regions.forEach((r) -> r.getEntitySpawners().forEach((sp) -> spawners.add(dm.getSpawnerLoader().load(sp))));
         dimension.getEntitySpawners().forEach((sp) -> spawners.add(dm.getSpawnerLoader().load(sp)));
-        biomes.forEach((i) -> i.getGenerators().forEach((j) -> generators.add(j.getCachedGenerator(null))));
+        biomes.forEach((i) -> i.getGenerators().forEach((j) -> generators.add(j.getCachedGenerator(() -> dm))));
         biomes.forEach((r) -> r.getLoot().getTables().forEach((i) -> loot.add(dm.getLootLoader().load(i))));
         biomes.forEach((r) -> r.getEntitySpawners().forEach((sp) -> spawners.add(dm.getSpawnerLoader().load(sp))));
         spawners.forEach((i) -> i.getSpawns().forEach((j) -> entities.add(dm.getEntityLoader().load(j.getEntity()))));

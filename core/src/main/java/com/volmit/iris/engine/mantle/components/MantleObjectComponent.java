@@ -20,6 +20,7 @@ package com.volmit.iris.engine.mantle.components;
 
 import com.volmit.iris.Iris;
 import com.volmit.iris.engine.data.cache.Cache;
+import com.volmit.iris.engine.mantle.ComponentFlag;
 import com.volmit.iris.engine.mantle.EngineMantle;
 import com.volmit.iris.engine.mantle.IrisMantleComponent;
 import com.volmit.iris.engine.mantle.MantleWriter;
@@ -32,13 +33,12 @@ import com.volmit.iris.util.data.B;
 import com.volmit.iris.util.documentation.BlockCoordinates;
 import com.volmit.iris.util.documentation.ChunkCoordinates;
 import com.volmit.iris.util.format.Form;
-import com.volmit.iris.util.mantle.MantleFlag;
+import com.volmit.iris.util.mantle.flag.ReservedFlag;
 import com.volmit.iris.util.math.RNG;
 import com.volmit.iris.util.matter.MatterStructurePOI;
 import com.volmit.iris.util.noise.CNG;
 import com.volmit.iris.util.noise.NoiseType;
 import com.volmit.iris.util.parallel.BurstExecutor;
-import lombok.Getter;
 import org.bukkit.util.BlockVector;
 
 import java.io.IOException;
@@ -46,12 +46,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
-@Getter
+@ComponentFlag(ReservedFlag.OBJECT)
 public class MantleObjectComponent extends IrisMantleComponent {
-    private final int radius = computeRadius();
 
     public MantleObjectComponent(EngineMantle engineMantle) {
-        super(engineMantle, MantleFlag.OBJECT, 1);
+        super(engineMantle, ReservedFlag.OBJECT, 1);
     }
 
     @Override
@@ -155,7 +154,7 @@ public class MantleObjectComponent extends IrisMantleComponent {
         return v;
     }
 
-    private int computeRadius() {
+    protected int computeRadius() {
         var dimension = getDimension();
 
         AtomicInteger xg = new AtomicInteger();
