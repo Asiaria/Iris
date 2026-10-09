@@ -1,0 +1,26 @@
+{
+  "name": "Fluid",
+  "derivative": "minecraft:ocean",
+  "vanillaDerivative": "minecraft:ocean",
+  "layers": [
+    {
+      "minHeight": 1,
+      "maxHeight": 1,
+      "palette": [{ "block": "minecraft:yellow_wool" }]
+    }
+  ],
+  "seaLayers": [
+    {
+      "minHeight": 1,
+      "maxHeight": 1,
+      "palette": [{ "block": "minecraft:ice" }]
+    }
+  ],
+  "generators": [
+    {
+      "generator": "flat",
+      "min": -8,
+      "max": -8
+    }
+  ]
+}

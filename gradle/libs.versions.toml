@@ -4,62 +4,67 @@
 
 [versions]
 # Plugins
-shadow = "9.0.0-rc1" # https://plugins.gradle.org/plugin/com.gradleup.shadow
-slimjar = "2.1.5" # https://plugins.gradle.org/plugin/de.crazydev22.slimjar
-download = "5.6.0" # https://plugins.gradle.org/plugin/de.undercouch.download
-runPaper = "2.3.1" # https://plugins.gradle.org/plugin/xyz.jpenilla.run-paper
-sentryPlugin = "5.8.0" # https://github.com/getsentry/sentry-android-gradle-plugin
-grgit = "5.3.2" # https://github.com/ajoberstar/grgit
+shadow = "9.5.1" # https://plugins.gradle.org/plugin/com.gradleup.shadow
+slimjar = "2.1.9" # https://plugins.gradle.org/plugin/de.crazydev22.slimjar
 
 # Core Libraries
-lombok = "1.18.38"
-spigot = "1.20.1-R0.1-SNAPSHOT" # https://hub.spigotmc.org/nexus/repository/snapshots/org/spigotmc/spigot-api/maven-metadata.xml
-log4j = "2.19.0" # https://central.sonatype.com/artifact/org.apache.logging.log4j/log4j-api
-adventure-api = "4.24.0" # https://github.com/KyoriPowered/adventure
-adventure-platform = "4.4.1" # https://github.com/KyoriPowered/adventure-platform
+lombok = "1.18.46"
+spigot = "26.2-R0.1-SNAPSHOT" # https://hub.spigotmc.org/nexus/repository/snapshots/org/spigotmc/spigot-api/maven-metadata.xml
+paper-api = "26.1.2.build.74-stable"
+log4j = "2.26.1" # https://central.sonatype.com/artifact/org.apache.logging.log4j/log4j-api
+adventure-api = "4.26.1" # https://github.com/KyoriPowered/adventure
 
-annotations = "26.0.2" # https://central.sonatype.com/artifact/org.jetbrains/annotations
+annotations = "26.1.0" # https://central.sonatype.com/artifact/org.jetbrains/annotations
 paralithic = "0.8.1" # https://github.com/PolyhedralDev/Paralithic/
 paperlib = "1.0.8" # https://github.com/PaperMC/PaperLib/
-bstats = "3.1.0" # https://github.com/Bastian/bstats-metrics/tree/master
-sentry = "8.14.0" # https://github.com/getsentry/sentry-java
-commons-io = "2.19.0" # https://central.sonatype.com/artifact/commons-io/commons-io
-commons-lang = "2.6" # https://central.sonatype.com/artifact/commons-lang/commons-lang
-commons-lang3 = "3.17.0" # https://central.sonatype.com/artifact/org.apache.commons/commons-lang3
-commons-math3 = "3.6.1"
-oshi = "6.8.2" # https://central.sonatype.com/artifact/com.github.oshi/oshi-core
-fastutil = "8.5.16" # https://central.sonatype.com/artifact/it.unimi.dsi/fastutil
-lz4 = "1.8.0" # https://central.sonatype.com/artifact/org.lz4/lz4-java
+bstats = "3.2.1" # https://github.com/Bastian/bstats-metrics/tree/master
+commons-io = "2.22.0" # https://central.sonatype.com/artifact/commons-io/commons-io
+commons-lang3 = "3.20.0" # https://central.sonatype.com/artifact/org.apache.commons/commons-lang3
+oshi = "6.9.0" # Minecraft 26.2 runtime ceiling
+fastutil = "8.5.18" # https://central.sonatype.com/artifact/it.unimi.dsi/fastutil
+lz4 = "1.8.1" # https://central.sonatype.com/artifact/org.lz4/lz4-java
 lru = "1.4.2" # https://central.sonatype.com/artifact/com.googlecode.concurrentlinkedhashmap/concurrentlinkedhashmap-lru
-zip = "1.17" # https://central.sonatype.com/artifact/org.zeroturnaround/zt-zip
-gson = "2.13.1" # https://central.sonatype.com/artifact/com.google.code.gson/gson
-asm = "9.8" # https://central.sonatype.com/artifact/org.ow2.asm/asm
-caffeine = "3.2.1" # https://central.sonatype.com/artifact/com.github.ben-manes.caffeine/caffeine
-byte-buddy = "1.17.6" # https://central.sonatype.com/artifact/net.bytebuddy/byte-buddy
+zip = "1.18.2" # https://central.sonatype.com/artifact/org.zeroturnaround/zt-zip
+gson = "2.14.0" # https://central.sonatype.com/artifact/com.google.code.gson/gson
+guava = "33.6.0-jre" # https://central.sonatype.com/artifact/com.google.guava/guava
+asm = "9.10.1" # https://central.sonatype.com/artifact/org.ow2.asm/asm
+caffeine = "3.2.4" # https://central.sonatype.com/artifact/com.github.ben-manes.caffeine/caffeine
+byte-buddy = "1.18.11" # https://central.sonatype.com/artifact/net.bytebuddy/byte-buddy
 dom4j = "2.2.0" # https://central.sonatype.com/artifact/org.dom4j/dom4j
-jaxen = "2.0.0" # https://central.sonatype.com/artifact/jaxen/jaxen
-
-# Script Engine
-kotlin = "2.2.0"
-kotlin-coroutines = "1.10.2"
-maven-core = "3.9.10"
+jaxen = "2.0.6" # https://central.sonatype.com/artifact/jaxen/jaxen
 
 # Third Party Integrations
-nexo = "1.10.0" # https://repo.nexomc.com/#/releases/com/nexomc/nexo
-itemsadder = "4.0.10" # https://github.com/LoneDev6/API-ItemsAdder
+nexo = "1.25.0" # https://repo.nexomc.com/#/releases/com/nexomc/nexo
+oraxen = "1.218.0"
+itemsadder = "4.0.17" # https://github.com/LoneDev6/API-ItemsAdder
 placeholderApi = "2.11.6" # https://repo.extendedclip.com/#/releases/me/clip/placeholderapi
 score = "5.25.3.9" # https://github.com/Ssomar-Developement/SCore
-mmoitems = "6.9.5-SNAPSHOT" # https://nexus.phoenixdevt.fr/repository/maven-public/net/Indyuce/MMOItems-API/maven-metadata.xml
-ecoitems = "5.63.1" # https://github.com/Auxilor/EcoItems/tags
-mythic = "5.9.5"
-mythic-chrucible = "2.1.0"
+mmoitems = "6.10.1-SNAPSHOT" # https://nexus.phoenixdevt.fr/repository/maven-public/net/Indyuce/MMOItems-API/maven-metadata.xml
+mythiclib = "1.7.1-SNAPSHOT" # https://nexus.phoenixdevt.fr/repository/maven-public/io/lumine/MythicLib-dist/maven-metadata.xml
+eco = "2026.27" # https://repo.auxilor.io/repository/maven-public/com/willfp/eco/maven-metadata.xml
+mythic = "5.12.1"
+mythic-crucible = "2.2.0"
 kgenerators = "7.3" # https://repo.codemc.io/repository/maven-public/me/kryniowesegryderiusz/kgenerators-core/maven-metadata.xml
-multiverseCore = "5.1.0"
+multiverseCore = "5.8.0"
+craftengine = "26.8.2" # https://github.com/Xiao-MoMi/craft-engine/releases
+
+# Fabric API (net.fabricmc.fabric-api) - each module is independently versioned
+fabricApi-base = "2.0.6+fcdff87f5d"
+fabricApi-registrySync = "8.0.1+fcdff87f5d"
+fabricApi-resourceLoader = "3.0.4+fcdff87f5d"
+fabricApi-lifecycleEvents = "4.1.9+ffef5f675d"
+fabricApi-commandApi = "3.1.2+fcdff87f5d"
+fabricApi-eventsInteraction = "5.3.6+3434d6d95d"
+fabricApi-networking = "6.3.8+fcdff87f5d"
+fabricApi-rendering = "27.0.14+901a437c5d"
+fabricApi-keyMapping = "2.0.8+3434d6d95d"
+fabricApi-permission = "1.0.8+fcdff87f5d"
 
 [libraries]
 # Core Libraries
 lombok = { module = "org.projectlombok:lombok", version.ref ="lombok" }
 spigot = { module = "org.spigotmc:spigot-api", version.ref = "spigot" }
+paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paper-api" }
 log4j-api = { module = "org.apache.logging.log4j:log4j-api", version.ref = "log4j" }
 log4j-core = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
 annotations = { module = "org.jetbrains:annotations", version.ref = "annotations" }
@@ -67,22 +72,21 @@ annotations = { module = "org.jetbrains:annotations", version.ref = "annotations
 # Dynamically Loaded
 adventure-api = { module = "net.kyori:adventure-api", version.ref = "adventure-api" }
 adventure-minimessage = { module = "net.kyori:adventure-text-minimessage", version.ref = "adventure-api" }
-adventure-platform = { module = "net.kyori:adventure-platform-bukkit", version.ref = "adventure-platform" }
+adventure-serializer-legacy = { module = "net.kyori:adventure-text-serializer-legacy", version.ref = "adventure-api" }
+adventure-serializer-plain = { module = "net.kyori:adventure-text-serializer-plain", version.ref = "adventure-api" }
 
 paralithic = { module = "com.dfsek:paralithic", version.ref = "paralithic" }
 paperlib = { module = "io.papermc:paperlib", version.ref = "paperlib" }
 bstats = { module = "org.bstats:bstats-bukkit", version.ref = "bstats" }
-sentry = { module = "io.sentry:sentry", version.ref = "sentry" }
 commons-io = { module = "commons-io:commons-io", version.ref = "commons-io" }
-commons-lang = { module = "commons-lang:commons-lang", version.ref = "commons-lang" }
 commons-lang3 = { module = "org.apache.commons:commons-lang3", version.ref = "commons-lang3" }
-commons-math3 = { module = "org.apache.commons:commons-math3", version.ref = "commons-math3" }
 oshi = { module = "com.github.oshi:oshi-core", version.ref = "oshi" }
-lz4 = { module = "org.lz4:lz4-java", version.ref = "lz4" }
+lz4 = { module = "at.yawk.lz4:lz4-java", version.ref = "lz4" }
 fastutil = { module = "it.unimi.dsi:fastutil", version.ref = "fastutil" }
 lru = { module = "com.googlecode.concurrentlinkedhashmap:concurrentlinkedhashmap-lru", version.ref = "lru" }
 zip = { module = "org.zeroturnaround:zt-zip", version.ref = "zip" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+guava = { module = "com.google.guava:guava", version.ref = "guava" }
 asm = { module = "org.ow2.asm:asm", version.ref = "asm" }
 caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
 byteBuddy-core = { module = "net.bytebuddy:byte-buddy", version.ref = "byte-buddy" }
@@ -90,33 +94,34 @@ byteBuddy-agent = { module = "net.bytebuddy:byte-buddy-agent", version.ref = "by
 dom4j = { module = "org.dom4j:dom4j", version.ref = "dom4j" }
 jaxen = { module = "jaxen:jaxen", version.ref = "jaxen" }
 
-# Script Engine
-kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib-jdk8", version.ref = "kotlin" }
-kotlin-scripting-common = { module = "org.jetbrains.kotlin:kotlin-scripting-common", version.ref = "kotlin" }
-kotlin-scripting-jvm = { module = "org.jetbrains.kotlin:kotlin-scripting-jvm", version.ref = "kotlin" }
-kotlin-scripting-jvm-host = { module = "org.jetbrains.kotlin:kotlin-scripting-jvm-host", version.ref = "kotlin" }
-kotlin-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlin-coroutines" }
-kotlin-scripting-dependencies-maven = { module = "org.jetbrains.kotlin:kotlin-scripting-dependencies-maven", version.ref = "kotlin" }
-mavenCore = { module = "org.apache.maven:maven-core", version.ref = "maven-core" }
-
 # Third Party Integrations
 nexo = { module = "com.nexomc:nexo", version.ref = "nexo" }
-itemsadder = { module = "dev.lone:api-itemsadder", version.ref = "itemsadder" }
+oraxen = { module = "io.th0rgal:oraxen", version.ref = "oraxen" }
+itemsadder = { module = "beer.devs:itemsadder-api", version.ref = "itemsadder" }
 placeholderApi = { module = "me.clip:placeholderapi", version.ref = "placeholderApi" }
 score = { module = "com.github.Ssomar-Developement:SCore", version.ref = "score" }
 mmoitems = { module = "net.Indyuce:MMOItems-API", version.ref = "mmoitems" }
-ecoitems = { module = "com.willfp:EcoItems", version.ref = "ecoitems" }
+mythiclib = { module = "io.lumine:MythicLib-dist", version.ref = "mythiclib" }
+eco = { module = "com.willfp:eco", version.ref = "eco" }
 mythic = { module = "io.lumine:Mythic-Dist", version.ref = "mythic" }
-mythicChrucible = { module = "io.lumine:MythicCrucible-Dist", version.ref = "mythic-chrucible" }
+mythicCrucible = { module = "io.lumine:MythicCrucible-Dist", version.ref = "mythic-crucible" }
 kgenerators = { module = "me.kryniowesegryderiusz:kgenerators-core", version.ref = "kgenerators" }
 multiverseCore = { module = "org.mvplugins.multiverse.core:multiverse-core", version.ref = "multiverseCore" }
+craftengine-core = { module = "net.momirealms:craft-engine-core", version.ref = "craftengine" }
+craftengine-bukkit = { module = "net.momirealms:craft-engine-bukkit", version.ref = "craftengine" }
+
+# Fabric API
+fabricApi-base = { module = "net.fabricmc.fabric-api:fabric-api-base", version.ref = "fabricApi-base" }
+fabricApi-registrySync = { module = "net.fabricmc.fabric-api:fabric-registry-sync-v0", version.ref = "fabricApi-registrySync" }
+fabricApi-resourceLoader = { module = "net.fabricmc.fabric-api:fabric-resource-loader-v1", version.ref = "fabricApi-resourceLoader" }
+fabricApi-lifecycleEvents = { module = "net.fabricmc.fabric-api:fabric-lifecycle-events-v1", version.ref = "fabricApi-lifecycleEvents" }
+fabricApi-commandApi = { module = "net.fabricmc.fabric-api:fabric-command-api-v2", version.ref = "fabricApi-commandApi" }
+fabricApi-eventsInteraction = { module = "net.fabricmc.fabric-api:fabric-events-interaction-v0", version.ref = "fabricApi-eventsInteraction" }
+fabricApi-networking = { module = "net.fabricmc.fabric-api:fabric-networking-api-v1", version.ref = "fabricApi-networking" }
+fabricApi-rendering = { module = "net.fabricmc.fabric-api:fabric-rendering-v1", version.ref = "fabricApi-rendering" }
+fabricApi-keyMapping = { module = "net.fabricmc.fabric-api:fabric-key-mapping-api-v1", version.ref = "fabricApi-keyMapping" }
+fabricApi-permission = { module = "net.fabricmc.fabric-api:fabric-permission-api-v1", version.ref = "fabricApi-permission" }
 
 [plugins]
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
 slimjar = { id = "de.crazydev22.slimjar", version.ref = "slimjar" }
-download = { id = "de.undercouch.download", version.ref = "download" }
-runPaper = { id = "xyz.jpenilla.run-paper", version.ref = "runPaper" }
-sentry = { id = "io.sentry.jvm.gradle", version.ref = "sentryPlugin" }
-kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
-kotlin-lombok = { id = "org.jetbrains.kotlin.plugin.lombok", version.ref = "kotlin" }
-grgit = { id = "org.ajoberstar.grgit", version.ref = "grgit" }

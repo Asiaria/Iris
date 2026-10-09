@@ -1,0 +1,471 @@
+package art.arcane.iris.generation.terrain;
+
+import art.arcane.iris.generation.cache.ConcurrentClockCache;
+import art.arcane.iris.pack.loading.IrisData;
+import art.arcane.iris.generation.biome.IrisBiome;
+import art.arcane.iris.generation.noise.IrisGeneratorStyle;
+import art.arcane.volmlib.util.noise.CNG;
+import art.arcane.volmlib.util.math.RNG;
+
+import java.util.Arrays;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+
+public final class Terrain3DRuntime {
+    private static final int STEP = 4;
+    private static final int MINIMUM_COLUMNS = 16;
+    private static final int ANCHOR_BLOCK_SIZE = 16;
+    private static final int MAXIMUM_ANCHORS = 32_768;
+    private static final long ANCHOR_CACHE_BYTES = 128L * 1024 * 1024;
+    private static final long DENSITY_SALT = 0x536E4A11C924B3D7L;
+    private static final long CRACK_SALT = 0x7839A16DC4052EFBL;
+    private static final NodeSample EMPTY_SAMPLE = new NodeSample(0D, 0D, 0D);
+    private static final CompiledProfile DISABLED = new CompiledProfile(null, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, null, null);
+
+    private final Sources sources;
+    private final Options options;
+    private final NoiseFactory noiseFactory;
+    private final BlockCache<Terrain3DFragmentFilter.DensityColumn> columns;
+    private final BlockCache<Anchor> anchors;
+    private final Terrain3DFragmentFilter fragments;
+    private final Object profileLock = new Object();
+    private volatile Map<IrisTerrain3D, CompiledProfile> profiles = new IdentityHashMap<>();
+    private final ThreadLocal<ColumnMemo> localColumn = ThreadLocal.withInitial(ColumnMemo::new);
+    private volatile Object cacheGeneration = new Object();
+
+    public Terrain3DRuntime(Sources sources, Options options) {
+        this(sources, options, (style, seed) -> {
+            CNG noise = style.createNoCache(new RNG(seed), options.data());
+            return noise::noiseFastSigned3D;
+        });
+    }
+
+    Terrain3DRuntime(Sources sources, Options options, NoiseFactory noiseFactory) {
+        this.sources = Objects.requireNonNull(sources, "Terrain sources");
+        this.options = Objects.requireNonNull(options, "Terrain options");
+        this.noiseFactory = Objects.requireNonNull(noiseFactory, "Terrain noise factory");
+        columns = new BlockCache<>(options.maximumColumns(), 0);
+        anchors = new BlockCache<>(anchorCacheCapacity(options.height(), options.maximumColumns()), 2);
+        fragments = new Terrain3DFragmentFilter(this::rawColumn);
+    }
+
+    public boolean active() {
+        return options.enabled();
+    }
+
+    static int anchorCacheCapacity(int height, int maximumColumns) {
+        long bytesPerAnchor = 160L + 48L * (Math.ceilDiv((long) height, STEP) + 1);
+        long maximumEntries = Math.min(MAXIMUM_ANCHORS,
+                Math.min((long) maximumColumns * 8, ANCHOR_CACHE_BYTES / bytesPerAnchor));
+        return Math.max(ANCHOR_BLOCK_SIZE, (int) (maximumEntries / ANCHOR_BLOCK_SIZE) * ANCHOR_BLOCK_SIZE);
+    }
+
+    public double height(int x, int z) {
+        if (!active()) {
+            return baseHeight(x, z);
+        }
+        ColumnMemo memo = localColumn.get();
+        if (memo.generation == cacheGeneration && memo.key == pack(x, z)) {
+            return memo.column.shaped() ? memo.column.topY() : memo.column.baseHeight();
+        }
+        return fragments.height(x, z);
+    }
+
+    public Terrain3DColumn column(int x, int z) {
+        if (!active()) {
+            return Terrain3DColumn.unshaped(baseHeight(x, z), options.height());
+        }
+        long key = pack(x, z);
+        Object generation = cacheGeneration;
+        ColumnMemo memo = localColumn.get();
+        if (memo.generation == generation && memo.key == key) {
+            return memo.column;
+        }
+        Terrain3DColumn column = fragments.column(x, z);
+        memo.key = key;
+        memo.column = column;
+        memo.generation = generation;
+        return column;
+    }
+
+    public void clear() {
+        columns.clear();
+        anchors.clear();
+        fragments.clear();
+        synchronized (profileLock) {
+            profiles = new IdentityHashMap<>();
+        }
+        cacheGeneration = new Object();
+        localColumn.remove();
+    }
+
+    int cachedColumnCount() {
+        return columns.size();
+    }
+
+    private Terrain3DFragmentFilter.DensityColumn rawColumn(int x, int z) {
+        Terrain3DFragmentFilter.DensityColumn cached = columns.get(x, z);
+        return cached == null ? columns.putIfAbsent(x, z,
+                new Terrain3DFragmentFilter.DensityColumn(createColumn(x, z))) : cached;
+    }
+
+    private Terrain3DColumn createColumn(int x, int z) {
+        double baseHeight = baseHeight(x, z);
+        int gridX = Math.floorDiv(x, STEP) * STEP;
+        int gridZ = Math.floorDiv(z, STEP) * STEP;
+        Anchor northWest = anchor(gridX, gridZ);
+        Anchor northEast = x == gridX ? northWest : anchor(gridX + STEP, gridZ);
+        Anchor southWest = z == gridZ ? northWest : anchor(gridX, gridZ + STEP);
+        Anchor southEast = x == gridX ? southWest
+                : z == gridZ ? northEast : anchor(gridX + STEP, gridZ + STEP);
+        double dx = (x - gridX) / (double) STEP;
+        double dz = (z - gridZ) / (double) STEP;
+        double amplitude = interpolate(northWest.amplitude(), northEast.amplitude(),
+                southWest.amplitude(), southEast.amplitude(), dx, dz);
+        double crackDepth = interpolate(northWest.crackDepth(), northEast.crackDepth(),
+                southWest.crackDepth(), southEast.crackDepth(), dx, dz);
+        if (amplitude + crackDepth <= 0D) {
+            return Terrain3DColumn.unshaped(baseHeight, options.height());
+        }
+        double densityHeight = baseHeight + interpolate(northWest.heightOffset(baseHeight),
+                northEast.heightOffset(baseHeight), southWest.heightOffset(baseHeight),
+                southEast.heightOffset(baseHeight), dx, dz);
+        double crackWidth = interpolate(northWest.profile.crackWidth, northEast.profile.crackWidth,
+                southWest.profile.crackWidth, southEast.profile.crackWidth, dx, dz);
+        int minimum = Math.max(Math.max(1, (int) Math.floor(options.fluidHeight()) + 1),
+                (int) Math.floor(densityHeight - amplitude - crackDepth));
+        int maximum = Math.min(options.height() - 1, (int) Math.ceil(densityHeight + amplitude));
+        if (minimum > maximum) {
+            return Terrain3DColumn.unshaped(baseHeight, options.height());
+        }
+        int[] boundaries = new int[16];
+        int count = 1;
+        boundaries[0] = 0;
+        boolean previousSolid = true;
+        int firstGridY = Math.floorDiv(minimum, STEP) * STEP;
+        NodeSample lowerNW = northWest.sample(firstGridY);
+        NodeSample lowerNE = northEast.sample(firstGridY);
+        NodeSample lowerSW = southWest.sample(firstGridY);
+        NodeSample lowerSE = southEast.sample(firstGridY);
+        double lowerDisplacement = interpolate(lowerNW.displacement, lowerNE.displacement,
+                lowerSW.displacement, lowerSE.displacement, dx, dz);
+        double lowerCrack = interpolate(lowerNW.crackDistance, lowerNE.crackDistance,
+                lowerSW.crackDistance, lowerSE.crackDistance, dx, dz);
+        double lowerDepth = interpolate(lowerNW.crackDepth, lowerNE.crackDepth,
+                lowerSW.crackDepth, lowerSE.crackDepth, dx, dz);
+        for (int gridY = firstGridY; gridY <= maximum; gridY += STEP) {
+            NodeSample upperNW = northWest.sample(gridY + STEP);
+            NodeSample upperNE = northEast.sample(gridY + STEP);
+            NodeSample upperSW = southWest.sample(gridY + STEP);
+            NodeSample upperSE = southEast.sample(gridY + STEP);
+            double upperDisplacement = interpolate(upperNW.displacement, upperNE.displacement,
+                    upperSW.displacement, upperSE.displacement, dx, dz);
+            double upperCrack = interpolate(upperNW.crackDistance, upperNE.crackDistance,
+                    upperSW.crackDistance, upperSE.crackDistance, dx, dz);
+            double upperDepth = interpolate(upperNW.crackDepth, upperNE.crackDepth,
+                    upperSW.crackDepth, upperSE.crackDepth, dx, dz);
+            int lastY = Math.min(maximum, gridY + STEP - 1);
+            for (int y = Math.max(minimum, gridY); y <= lastY; y++) {
+                double dy = (y - gridY) / (double) STEP;
+                double displacement = lerp(lowerDisplacement, upperDisplacement, dy);
+                double fissure = 0D;
+                if (crackDepth > 0D && crackWidth > 0D) {
+                    double distance = Math.abs(lerp(lowerCrack, upperCrack, dy));
+                    double ridge = Math.max(0D, 1D - distance / crackWidth);
+                    fissure = lerp(lowerDepth, upperDepth, dy) * ridge * ridge;
+                }
+                boolean solid = densityHeight + 0.5D - y + displacement - fissure >= 0D;
+                if (solid != previousSolid) {
+                    if (count == boundaries.length) {
+                        boundaries = Arrays.copyOf(boundaries, count * 2);
+                    }
+                    boundaries[count++] = solid ? y : y - 1;
+                    previousSolid = solid;
+                }
+            }
+            lowerDisplacement = upperDisplacement;
+            lowerCrack = upperCrack;
+            lowerDepth = upperDepth;
+        }
+        if (previousSolid) {
+            if (count == boundaries.length) {
+                boundaries = Arrays.copyOf(boundaries, count + 1);
+            }
+            boundaries[count++] = maximum;
+        }
+        return new Terrain3DColumn(baseHeight, minimum, true, Arrays.copyOf(boundaries, count));
+    }
+
+    private Anchor anchor(int x, int z) {
+        Anchor cached = anchors.get(x, z);
+        return cached == null ? anchors.putIfAbsent(x, z, createAnchor(x, z)) : cached;
+    }
+
+    private Anchor createAnchor(int x, int z) {
+        IrisBiome biome = sources.biomes().sample(x, z);
+        CompiledProfile profile = profile(biome == null ? null : biome.getTerrain3D());
+        if (profile == DISABLED) {
+            return new Anchor(x, z, profile, 0D, 0D);
+        }
+        double height = baseHeight(x, z);
+        double elevationStrength = smooth((height - options.fluidHeight() - profile.fluidClearance)
+                / profile.fluidFade);
+        if (elevationStrength <= 0D) {
+            return new Anchor(x, z, profile, height, 0D);
+        }
+        double slopeStrength = 1D;
+        if (profile.minimumSlope > 0D) {
+            double east = (baseHeight(x + STEP, z) - height) / STEP;
+            double south = (baseHeight(x, z + STEP) - height) / STEP;
+            double slope = StrictMath.sqrt(east * east + south * south);
+            slopeStrength = smooth((slope - profile.minimumSlope) / profile.slopeFade);
+        }
+        return new Anchor(x, z, profile, height, elevationStrength * slopeStrength);
+    }
+
+    private CompiledProfile profile(IrisTerrain3D config) {
+        if (config == null || !config.isEnabled()) {
+            return DISABLED;
+        }
+        CompiledProfile cached = profiles.get(config);
+        if (cached != null) {
+            return cached;
+        }
+        CompiledProfile compiled = compile(config);
+        synchronized (profileLock) {
+            CompiledProfile existing = profiles.get(config);
+            if (existing != null) {
+                return existing;
+            }
+            Map<IrisTerrain3D, CompiledProfile> updated = new IdentityHashMap<>(profiles);
+            updated.put(config, compiled);
+            profiles = updated;
+            return compiled;
+        }
+    }
+
+    private CompiledProfile compile(IrisTerrain3D config) {
+        config.validate();
+        double amplitude = config.getAmplitude();
+        double crackDepth = config.getCrackDepth();
+        double horizontalScale = config.getHorizontalScale();
+        double verticalScale = config.getVerticalScale();
+        double crackScale = config.getCrackScale();
+        double crackWidth = config.getCrackWidth();
+        double minimumSlope = config.getMinimumSlope();
+        double slopeFade = config.getSlopeFade();
+        double fluidClearance = config.getFluidClearance();
+        double fluidFade = config.getFluidFade();
+        if (amplitude + crackDepth == 0D) {
+            return DISABLED;
+        }
+        long seed = options.seed() ^ config.getSeed();
+        NoiseSource density = amplitude == 0D ? null : noiseFactory.create(
+                Objects.requireNonNull(config.getDensityStyle(), "terrain3D.densityStyle"), seed ^ DENSITY_SALT);
+        NoiseSource cracks = crackDepth == 0D ? null : noiseFactory.create(
+                Objects.requireNonNull(config.getCrackStyle(), "terrain3D.crackStyle"), seed ^ CRACK_SALT);
+        return new CompiledProfile(config, amplitude, crackDepth, crackWidth, crackScale,
+                64D / horizontalScale, 64D / verticalScale, 64D / crackScale,
+                minimumSlope, slopeFade, fluidClearance, fluidFade, density, cracks);
+    }
+
+    private double baseHeight(int x, int z) {
+        double height = sources.heights().sample(x, z);
+        if (!Double.isFinite(height)) {
+            throw new IllegalStateException("Nonfinite terrain height at " + x + "," + z);
+        }
+        return height;
+    }
+
+    private static double signed(NoiseSource source, double x, double y, double z) {
+        double sampled = source.sample(x, y, z);
+        if (!Double.isFinite(sampled)) {
+            throw new IllegalStateException("Nonfinite terrain3D density at " + x + "," + y + "," + z);
+        }
+        return Math.clamp(sampled, -1D, 1D);
+    }
+
+    private static double interpolate(double northWest, double northEast, double southWest,
+                                      double southEast, double x, double z) {
+        return lerp(lerp(northWest, northEast, x), lerp(southWest, southEast, x), z);
+    }
+
+    private static double lerp(double lower, double upper, double fraction) {
+        return lower + (upper - lower) * fraction;
+    }
+
+    private static double smooth(double value) {
+        double bounded = Math.clamp(value, 0D, 1D);
+        return bounded * bounded * (3D - 2D * bounded);
+    }
+
+    private static long pack(int x, int z) {
+        return (long) x << 32 ^ z & 0xffffffffL;
+    }
+
+    public record Sources(BaseHeightSource heights, BiomeSource biomes) {
+        public Sources {
+            Objects.requireNonNull(heights, "Base terrain height source");
+            Objects.requireNonNull(biomes, "Base terrain biome source");
+        }
+    }
+
+    public record Options(long seed, int height, double fluidHeight, IrisData data,
+                          boolean enabled, int maximumColumns) {
+        public Options {
+            if (height < 2 || height > 4096 || !Double.isFinite(fluidHeight)
+                    || maximumColumns < MINIMUM_COLUMNS) {
+                throw new IllegalArgumentException("Invalid volumetric terrain runtime options");
+            }
+        }
+    }
+
+    @FunctionalInterface
+    public interface BaseHeightSource {
+        double sample(int x, int z);
+    }
+
+    @FunctionalInterface
+    public interface BiomeSource {
+        IrisBiome sample(int x, int z);
+    }
+
+    @FunctionalInterface
+    interface NoiseFactory {
+        NoiseSource create(IrisGeneratorStyle style, long seed);
+    }
+
+    @FunctionalInterface
+    interface NoiseSource {
+        double sample(double x, double y, double z);
+    }
+
+    private static final class ColumnMemo {
+        private Object generation;
+        private long key;
+        private Terrain3DColumn column;
+    }
+
+    private final class Anchor {
+        private final int x;
+        private final int z;
+        private final CompiledProfile profile;
+        private final double height;
+        private final double strength;
+        private final AtomicReferenceArray<NodeSample> samples;
+
+        private Anchor(int x, int z, CompiledProfile profile, double height, double strength) {
+            this.x = x;
+            this.z = z;
+            this.profile = profile;
+            this.height = height;
+            this.strength = strength;
+            samples = strength == 0D ? null
+                    : new AtomicReferenceArray<>(Math.ceilDiv(options.height(), STEP) + 1);
+        }
+
+        private double amplitude() {
+            return profile.amplitude * strength;
+        }
+
+        private double crackDepth() {
+            return profile.crackDepth * strength;
+        }
+
+        private double heightOffset(double baseHeight) {
+            return (height - baseHeight) * strength;
+        }
+
+        private NodeSample sample(int y) {
+            if (samples == null) {
+                return EMPTY_SAMPLE;
+            }
+            int index = y / STEP;
+            NodeSample cached = samples.get(index);
+            if (cached != null) {
+                return cached;
+            }
+            double fade = strength * smooth((y - options.fluidHeight() - profile.fluidClearance)
+                    / profile.fluidFade);
+            double displacement = profile.density == null || fade == 0D ? 0D
+                    : profile.amplitude * fade * signed(profile.density,
+                    x * profile.horizontalFrequency, y * profile.verticalFrequency, z * profile.horizontalFrequency);
+            double crackDistance = profile.cracks == null || fade == 0D ? 0D
+                    : profile.crackScale * 0.5D * signed(profile.cracks,
+                    x * profile.crackFrequency, y * profile.crackFrequency * 0.25D, z * profile.crackFrequency);
+            NodeSample computed = new NodeSample(displacement, crackDistance, profile.crackDepth * fade);
+            return samples.compareAndSet(index, null, computed) ? computed : samples.get(index);
+        }
+    }
+
+    private record NodeSample(double displacement, double crackDistance, double crackDepth) {
+    }
+
+    private record CompiledProfile(IrisTerrain3D config, double amplitude, double crackDepth,
+                                   double crackWidth, double crackScale, double horizontalFrequency,
+                                   double verticalFrequency, double crackFrequency,
+                                   double minimumSlope, double slopeFade, double fluidClearance,
+                                   double fluidFade, NoiseSource density, NoiseSource cracks) {
+    }
+
+    /**
+     * Groups the 16x16 block area of one chunk into a single cache entry, so neighbouring lookups share one
+     * lock-free set probe and a working set of whole chunks is evicted together.
+     */
+    private static final class BlockCache<T> {
+        private final ConcurrentClockCache<AtomicReferenceArray<T>> blocks;
+        private final int cellShift;
+        private final int axisMask;
+        private final int axisBits;
+
+        private BlockCache(int maximumEntries, int cellShift) {
+            this.cellShift = cellShift;
+            axisBits = 4 - cellShift;
+            axisMask = (1 << axisBits) - 1;
+            int blockSize = 1 << (axisBits * 2);
+            blocks = new ConcurrentClockCache<>(Math.ceilDiv(maximumEntries, blockSize));
+        }
+
+        private T get(int x, int z) {
+            AtomicReferenceArray<T> block = blocks.get(blockKey(x, z));
+            return block == null ? null : block.getAcquire(slot(x, z));
+        }
+
+        private T putIfAbsent(int x, int z, T value) {
+            long key = blockKey(x, z);
+            AtomicReferenceArray<T> block = blocks.get(key);
+            if (block == null) {
+                block = blocks.putIfAbsent(key, new AtomicReferenceArray<>(1 << (axisBits * 2)));
+            }
+            T existing = block.compareAndExchange(slot(x, z), null, value);
+            return existing == null ? value : existing;
+        }
+
+        private void clear() {
+            blocks.clear();
+        }
+
+        private int size() {
+            int[] size = new int[1];
+            blocks.forEach(block -> {
+                for (int index = 0; index < block.length(); index++) {
+                    if (block.getAcquire(index) != null) {
+                        size[0]++;
+                    }
+                }
+            });
+            return size[0];
+        }
+
+        private static long blockKey(int x, int z) {
+            return pack(x >> 4, z >> 4);
+        }
+
+        private int slot(int x, int z) {
+            return ((x >> cellShift) & axisMask) << axisBits | ((z >> cellShift) & axisMask);
+        }
+    }
+}

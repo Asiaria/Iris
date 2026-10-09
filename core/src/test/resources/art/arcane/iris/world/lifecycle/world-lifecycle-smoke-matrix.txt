@@ -1,0 +1,29 @@
+Paper 26.2
+/iris create matrix-paper overworld
+/iris std o overworld
+close Studio world
+benchmark create/unload
+
+Purpur 26.2
+/iris create matrix-purpur overworld
+/iris std o overworld
+close Studio world
+benchmark create/unload
+
+Canvas 26.2
+/iris create matrix-canvas overworld
+/iris std o overworld
+close Studio world
+benchmark create/unload
+
+Folia 26.2
+/iris create matrix-folia overworld
+/iris std o overworld
+close Studio world
+benchmark create/unload
+
+Spigot 26.2
+/iris create matrix-spigot overworld
+/iris std o overworld
+close Studio world
+unload/remove

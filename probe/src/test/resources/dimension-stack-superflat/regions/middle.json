@@ -1,0 +1,6 @@
+{
+  "name": "Middle",
+  "landBiomes": ["middle"],
+  "seaBiomes": ["middle"],
+  "shoreBiomes": ["middle"]
+}

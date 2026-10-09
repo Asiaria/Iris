@@ -1,0 +1,38 @@
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+
+plugins {
+    id 'java'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+repositories {
+    mavenCentral()
+    gradlePluginPortal()
+    maven {
+        url = uri('https://jitpack.io')
+    }
+}
+
+// Nothing else asks buildSrc for `test`: Gradle only requests the jar that carries the build logic.
+// Gating the jar on the tests is what makes them run at all, and it costs nothing once they are green.
+tasks.named('jar').configure {
+    dependsOn(tasks.named('test'))
+}
+
+tasks.named('test').configure {
+    jvmArgs('--add-opens=java.base/java.lang=ALL-UNNAMED')
+}
+
+dependencies {
+    implementation(gradleApi())
+    implementation('org.ow2.asm:asm:9.10.1')
+    implementation('org.apache.commons:commons-compress:1.28.0')
+    implementation('org.tukaani:xz:1.10')
+    implementation('io.papermc.paperweight:paperweight-userdev:2.0.0-beta.21')
+    testImplementation('junit:junit:4.13.2')
+}

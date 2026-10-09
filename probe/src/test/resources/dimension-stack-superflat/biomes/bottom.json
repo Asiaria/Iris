@@ -1,0 +1,19 @@
+{
+  "name": "Bottom",
+  "derivative": "minecraft:plains",
+  "vanillaDerivative": "minecraft:plains",
+  "layers": [
+    {
+      "minHeight": 1,
+      "maxHeight": 1,
+      "palette": [{ "block": "minecraft:light_blue_wool" }]
+    }
+  ],
+  "generators": [
+    {
+      "generator": "flat",
+      "min": 15,
+      "max": 15
+    }
+  ]
+}

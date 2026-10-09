@@ -1,0 +1,6 @@
+{
+  "name": "Fluid",
+  "landBiomes": ["fluid"],
+  "seaBiomes": ["fluid"],
+  "shoreBiomes": ["fluid"]
+}

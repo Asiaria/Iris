@@ -1,0 +1,21 @@
+{
+  "name": "Clipped Stacked Superflat",
+  "version": 1,
+  "mode": { "type": "SUPERFLAT" },
+  "regions": ["bottom"],
+  "focusRegion": "bottom",
+  "focus": "bottom",
+  "landChance": 1,
+  "environment": "NORMAL",
+  "dimensionHeight": { "min": -64, "max": 0 },
+  "logicalHeight": 64,
+  "fluidHeight": -64,
+  "bedrock": false,
+  "rockPalette": {
+    "palette": [{ "block": "minecraft:blue_concrete" }]
+  },
+  "dimensionStack": {
+    "dimensions": ["top", "stack-clipped"],
+    "spacer": 64
+  }
+}

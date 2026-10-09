@@ -1,0 +1,536 @@
+import io.github.slimjar.resolver.data.Mirror
+import org.gradle.api.file.FileTreeElement
+import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.TaskProvider
+import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.jvm.tasks.Jar
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+
+import java.net.URI
+import java.nio.charset.StandardCharsets
+
+/*
+ * Iris is a World Generator for Minecraft Bukkit Servers
+ * Copyright (c) 2021 Arcane Arts (Volmit Software)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+plugins {
+    id 'java'
+    id 'java-library'
+    id 'java-test-fixtures'
+    alias(libs.plugins.shadow)
+    alias(libs.plugins.slimjar)
+}
+
+apply from: rootProject.file('gradle/runtime-relocations.gradle')
+
+def lib = 'art.arcane.iris.util'
+
+String languageSourceReference = providers.gradleProperty('languageRevision').orElse('master').get()
+List<File> languageSourceFiles = fileTree('src/main/resources/languages') {
+    include('*.toml')
+}.files.toList().sort { File left, File right -> left.name <=> right.name }
+List<String> languageSourceLocales = languageSourceFiles.collect { File source ->
+    source.name.substring(0, source.name.length() - '.toml'.length())
+}
+def languageSourceManifestTask = tasks.register('generateLanguageSourceManifest', WriteProperties) {
+    destinationFile.set(layout.buildDirectory.file('generated/language-source/iris-language-source.properties'))
+    property('revision', languageSourceReference)
+    property('locales', languageSourceLocales.join(','))
+}
+def languageGuidesTask = tasks.register('generateLanguageGuides') {
+    inputs.files(languageSourceFiles)
+    def guideDirectory = layout.buildDirectory.dir('generated/language-guides')
+    outputs.dir(guideDirectory)
+    doLast {
+        File output = guideDirectory.get().asFile
+        output.mkdirs()
+        for (File source : languageSourceFiles) {
+            List<String> header = source.readLines('UTF-8').takeWhile { String line ->
+                line.isBlank() || line.stripLeading().startsWith('#')
+            }
+            String locale = source.name.substring(0, source.name.length() - '.toml'.length())
+            new File(output, locale + '.txt').setText(header.join('\n').stripTrailing() + '\n', 'UTF-8')
+        }
+    }
+}
+tasks.named('processResources').configure {
+    dependsOn(languageSourceManifestTask, languageGuidesTask)
+    exclude('languages/**')
+    from(languageSourceManifestTask)
+    from(languageGuidesTask) {
+        into('iris-language-guides')
+    }
+}
+
+/**
+ * Dependencies.
+ *
+ * Provided or classpath dependencies are not shaded and are available on the runtime classpath
+ *
+ * Shaded dependencies are not available at runtime, nor are they available on mvn central so they
+ * need to be shaded into the jar (increasing binary size)
+ *
+ * Dynamically loaded dependencies are defined in the plugin.yml (updating these must be updated in the
+ * plugin.yml also, otherwise they wont be available). These do not increase binary size). Only declare
+ * these dependencies if they are available on mvn central.
+ */
+dependencies {
+    api(project(':spi'))
+    api('com.github.VolmitSoftware.VolmLib:native-api:master-SNAPSHOT') {
+        transitive = false
+    }
+    api('com.github.VolmitSoftware.VolmLib:native-terrain-api:master-SNAPSHOT') {
+        transitive = false
+    }
+
+    // Provided or Classpath
+    compileOnly(libs.lombok)
+    annotationProcessor(libs.lombok)
+    compileOnly(libs.paper.api)
+    compileOnly(libs.log4j.api)
+    compileOnly(libs.log4j.core)
+    compileOnly(libs.guava)
+
+    // Third Party Integrations
+    compileOnly(libs.nexo)
+    compileOnly(libs.oraxen) {
+        transitive = false
+    }
+    compileOnly(libs.itemsadder)
+    compileOnly(libs.score)
+    compileOnly(libs.mmoitems)
+    compileOnly(libs.mythiclib)
+    compileOnly(libs.eco)
+    compileOnly(libs.mythic)
+    compileOnly(libs.mythicCrucible)
+    compileOnly(libs.kgenerators) {
+        transitive = false
+    }
+    compileOnly(libs.multiverseCore)
+    compileOnly(libs.craftengine.core)
+    compileOnly(libs.craftengine.bukkit)
+
+    // Shaded
+    implementation('de.crazydev22.slimjar.helper:spigot:2.1.9')
+    implementation('com.github.VolmitSoftware.VolmLib:volmlib-shared:master-SNAPSHOT') {
+        transitive = false
+    }
+    implementation('com.moandjiezana.toml:toml4j:0.7.2') {
+        transitive = false
+    }
+    // Dynamically Loaded
+    slim(libs.gson)
+    slim(libs.lru)
+    slim(libs.caffeine)
+    slim(libs.paralithic)
+    slim(libs.paperlib)
+    slim(libs.adventure.api)
+    slim(libs.adventure.minimessage)
+    slim(libs.adventure.serializer.legacy)
+    slim(libs.adventure.serializer.plain)
+    slim(libs.bstats)
+    slim(libs.commons.io)
+    slim(libs.commons.lang3)
+    slim(libs.oshi)
+    slim(libs.lz4)
+    slim('com.fulcrumgenomics:jlibdeflate:0.2.0')
+    slim(libs.fastutil)
+    slim(libs.zip) {
+        exclude(group: 'org.slf4j', module: 'slf4j-api')
+    }
+    slim(libs.asm)
+    slim(libs.byteBuddy.core)
+    slim(libs.byteBuddy.agent)
+    slim(libs.dom4j)
+    slim(libs.jaxen)
+
+    testFixturesImplementation('junit:junit:4.13.2')
+    testFixturesImplementation('org.mockito:mockito-core:5.23.0')
+    testFixturesCompileOnly(libs.paper.api)
+
+    testImplementation('junit:junit:4.13.2')
+    testImplementation('org.mockito:mockito-core:5.23.0')
+    testImplementation(libs.paper.api)
+    testImplementation(libs.log4j.core)
+    testRuntimeOnly(libs.paper.api)
+    testImplementation(libs.multiverseCore)
+    testImplementation(libs.annotations)
+    testImplementation(libs.mythic)
+}
+
+tasks.named('test').configure {
+    maxHeapSize = '1g'
+    jvmArgs('-XX:+ExitOnOutOfMemoryError')
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+slimJar {
+    mirrors = [
+        new Mirror(
+            URI.create('https://maven-central.storage-download.googleapis.com/maven2').toURL(),
+            URI.create('https://repo.maven.apache.org/maven2/').toURL()
+        )
+    ]
+
+    for (Map.Entry<String, String> relocation : runtimeDownloadRelocations.entrySet()) {
+        relocate(relocation.getKey(), relocation.getValue())
+    }
+}
+
+def embeddedAgentJar = project(':core:agent').tasks.named('jar', Jar)
+def templateSource = file('src/main/templates')
+def templateDest = layout.buildDirectory.dir('generated/sources/templates')
+def generateTemplates = tasks.register('generateTemplates', Copy) {
+    inputs.properties([
+        environment: providers.provider {
+            if (project.hasProperty('release')) {
+                return 'production'
+            }
+            if (project.hasProperty('argghh')) {
+                return 'Argghh!'
+            }
+            return 'development'
+        },
+        commit: providers.provider {
+            String commitId = null
+            Exception failure = null
+            try {
+                Process process = new ProcessBuilder('git', '-C', rootProject.projectDir.absolutePath, 'rev-parse', 'HEAD')
+                        .redirectErrorStream(true)
+                        .start()
+                String output = new String(process.inputStream.readAllBytes(), StandardCharsets.UTF_8).trim()
+                int exitCode = process.waitFor()
+                if (exitCode == 0) {
+                    commitId = output
+                } else {
+                    failure = new GradleException("git rev-parse exited with code ${exitCode}: ${output}")
+                }
+            } catch (Exception ex) {
+                failure = ex
+            }
+
+            if (commitId != null && commitId.length() == 40) {
+                return commitId
+            }
+
+            logger.error('Git commit hash not found', failure)
+            return 'unknown'
+        },
+        minecraftVersion: providers.gradleProperty('minecraftVersion'),
+    ])
+
+    from(templateSource)
+    into(templateDest)
+    rename { String fileName -> "art/arcane/iris/${fileName}" }
+    expand(inputs.properties)
+}
+
+tasks.named('compileJava', JavaCompile).configure {
+    /**
+     * We need parameter meta for the decree command system
+     */
+    options.compilerArgs.add('-parameters')
+    options.compilerArgs.addAll(['--add-modules', 'jdk.incubator.vector'])
+    options.encoding = 'UTF-8'
+    options.debugOptions.debugLevel = 'none'
+    // lombok.config decides how equals/hashCode/toString are generated (fields, never getters), so editing it
+    // changes this module's bytecode. Gradle does not know that on its own and would serve a stale up-to-date
+    // build until something else in the module changed.
+    inputs.file(rootProject.file('lombok.config'))
+        .withPropertyName('lombokConfig')
+        .withPathSensitivity(PathSensitivity.NONE)
+}
+
+tasks.named('test', Test).configure {
+    jvmArgs('--add-modules', 'jdk.incubator.vector')
+    dependsOn(languageSourceManifestTask)
+    classpath = files(layout.buildDirectory.dir('generated/language-source')) + files('src/main/resources') + sourceSets.main.output + classpath
+}
+
+configurations.matching { it.name.startsWith('slim') }.all { }
+
+// Unused VolmLib packages excluded from the Bukkit artifact. Every
+// class in each of these packages is unreachable from every other class shipped in the Bukkit jar,
+// and none of them is a reflective target: Matter.read() resolves only world/storage/matter, JarScanner
+// only walks Iris' own packages, and the remaining VolmLib Class.forName calls name Bukkit/NMS or
+// runtime-downloaded types. Package granularity is deliberate - a partially used package stays whole.
+// verifyBukkitArtifact re-derives the reference graph over the shipped jar and fails on any dangling
+// reference, so an exclude that stops being dead is a build failure rather than a runtime crash.
+List<String> unusedVolmLibPackages = [
+    'art/arcane/volmlib/util/uniques/**',
+    'art/arcane/volmlib/util/bukkit/json/**',
+    'art/arcane/volmlib/util/bukkit/registry/**',
+    'art/arcane/volmlib/util/director/visual/**',
+    'art/arcane/volmlib/util/value/**',
+    'art/arcane/volmlib/util/api/**',
+    'art/arcane/volmlib/util/entity/**',
+    'art/arcane/volmlib/util/reflect/**',
+    'art/arcane/iris/diagnostics/Report*.class',
+    'art/arcane/volmlib/integration/VaultEconomy*.class'
+]
+
+List<String> unusedVolmLibClasses = [
+    'art/arcane/volmlib/util/nbt/io/ParseException',
+    'art/arcane/volmlib/util/nbt/io/SNBTDeserializer',
+    'art/arcane/volmlib/util/nbt/io/SNBTParser',
+    'art/arcane/volmlib/util/nbt/io/SNBTSerializer',
+    'art/arcane/volmlib/util/nbt/io/SNBTUtil',
+    'art/arcane/volmlib/util/nbt/io/SNBTWriter',
+    'art/arcane/volmlib/util/nbt/io/StringPointer',
+    'art/arcane/volmlib/util/io/StringDeserializer',
+    'art/arcane/volmlib/util/io/StringSerializer',
+    'art/arcane/volmlib/util/json/EnumType',
+    'art/arcane/volmlib/util/json/HTTP',
+    'art/arcane/volmlib/util/json/HTTPTokener',
+    'art/arcane/volmlib/util/json/JSONML',
+    'art/arcane/volmlib/util/json/JSONStringer',
+    'art/arcane/volmlib/util/json/JSONWriter',
+    'art/arcane/volmlib/util/json/XML',
+    'art/arcane/volmlib/util/json/XMLTokener',
+    'art/arcane/volmlib/util/hud/HudLocalLedger',
+    'art/arcane/volmlib/util/hud/HudTitleClaim',
+    'art/arcane/volmlib/util/hud/HudTitleService',
+    'art/arcane/volmlib/util/scheduling/GroupedExecutor',
+    'art/arcane/volmlib/util/scheduling/SchedulerRuntime',
+    'art/arcane/volmlib/util/scheduling/TaskExecutor',
+    'art/arcane/volmlib/util/parallel/StreamUtilsSupport',
+    'art/arcane/volmlib/util/parallel/SyncExecutorSupport',
+    'art/arcane/volmlib/util/cache/ByteBitCache',
+    'art/arcane/volmlib/util/cache/DataBitCache',
+    'art/arcane/volmlib/util/cache/FloatBitCache',
+    'art/arcane/volmlib/util/cache/IntBitCache',
+    'art/arcane/volmlib/util/cache/ShortBitCache',
+    'art/arcane/volmlib/util/cache/UByteBitCache',
+    'art/arcane/volmlib/util/data/ChunkCache',
+    'art/arcane/volmlib/util/data/ComplexCache',
+    'art/arcane/volmlib/util/data/IrisBiomeStorage',
+    'art/arcane/volmlib/util/data/NibbleArray',
+    'art/arcane/volmlib/util/data/NibbleDataPalette',
+    'art/arcane/volmlib/util/data/Recycler',
+    'art/arcane/volmlib/util/data/VanillaBiomeMap',
+    'art/arcane/volmlib/util/data/Writable',
+    'art/arcane/volmlib/util/data/base/ComplexCacheBase',
+    'art/arcane/volmlib/util/director/DirectorNodeBase',
+    'art/arcane/volmlib/util/director/DirectorParameterBase',
+    'art/arcane/volmlib/util/director/theme/DirectorThemes',
+    'art/arcane/volmlib/util/math/INode',
+    'art/arcane/volmlib/util/math/IrisMathHelper',
+    'art/arcane/volmlib/util/math/KochanekBartelsInterpolation',
+    'art/arcane/volmlib/util/math/PathInterpolation',
+    'art/arcane/volmlib/util/math/Spiral',
+    'art/arcane/volmlib/util/board/BoardManager',
+    'art/arcane/volmlib/util/board/BoardUpdateTask',
+    'art/arcane/volmlib/util/bukkit/Placeholders',
+    'art/arcane/volmlib/util/exceptions/MissingDimensionException',
+    'art/arcane/volmlib/util/function/Supplier2',
+    'art/arcane/volmlib/util/function/Supplier3',
+    'art/arcane/volmlib/util/inventorygui/UIRainbowDecorator',
+    'art/arcane/volmlib/util/io/Converter',
+    'art/arcane/volmlib/util/matter/MatterPlacer',
+    'art/arcane/volmlib/util/plugin/SplashScreenSupport',
+    'art/arcane/volmlib/util/scheduling/Contained',
+    'art/arcane/volmlib/util/scheduling/IrisLock',
+    'art/arcane/volmlib/util/scheduling/QueueExecutor',
+    'art/arcane/volmlib/util/scheduling/S',
+    'art/arcane/volmlib/util/scheduling/SBase',
+    'art/arcane/volmlib/util/scheduling/SlidingWindowRateLimiter',
+    'art/arcane/volmlib/util/scheduling/Switch',
+    'art/arcane/volmlib/util/scheduling/ThreadMonitor',
+    'art/arcane/volmlib/util/cache/ByteCache',
+    'art/arcane/volmlib/util/cache/ChunkCache2DSimple',
+    'art/arcane/volmlib/util/cache/IntCache',
+    'art/arcane/volmlib/util/cache/ShortCache',
+    'art/arcane/volmlib/util/cache/UByteCache',
+    'art/arcane/volmlib/util/cache/WorldCache2DSimple',
+    'art/arcane/volmlib/util/data/CuboidException',
+    'art/arcane/volmlib/util/data/DUTF',
+    'art/arcane/volmlib/util/data/Heafty',
+    'art/arcane/volmlib/util/data/InvertedBiomeGrid',
+    'art/arcane/volmlib/util/data/Shrinkwrap',
+    'art/arcane/volmlib/util/data/WeightMap',
+    'art/arcane/volmlib/util/data/WeightedRandom',
+    'art/arcane/volmlib/util/director/compat/BukkitDirectorContext',
+    'art/arcane/volmlib/util/director/handlers/base/DummyHandlerBase',
+    'art/arcane/volmlib/util/director/handlers/base/OptionalWorldHandlerBase',
+    'art/arcane/volmlib/util/parallel/BurstedHunk',
+    'art/arcane/volmlib/util/parallel/GridLockSupport',
+    'art/arcane/volmlib/util/parallel/NoopGridLockSupport',
+    'art/arcane/volmlib/util/bukkit/ChunkPositionSet',
+    'art/arcane/volmlib/util/bukkit/Events',
+    'art/arcane/volmlib/util/json/SingleCollectionTypeFactory',
+    'art/arcane/volmlib/util/collection/StateList',
+    'art/arcane/iris/world/task/jobs/DownloadJob',
+    'art/arcane/iris/world/task/jobs/JobCollection',
+    'art/arcane/iris/world/task/jobs/ParallelQueueJob',
+    'art/arcane/iris/world/task/jobs/QueueJob',
+    'art/arcane/iris/structure/object/WorldObjectPlacer',
+    'art/arcane/iris/structure/object/IPostBlockAccess',
+    'art/arcane/iris/world/entity/IrisPotionEffect',
+    'art/arcane/iris/platform/generation/DummyChunkGenerator',
+    'art/arcane/iris/generation/concurrent/GridLock',
+    'art/arcane/iris/platform/reflect/W',
+    'art/arcane/iris/util/slimjar/BuildConstants',
+    'art/arcane/iris/util/slimjar/relocation/meta/AttributeMetaMediator',
+    'art/arcane/iris/util/slimjar/relocation/meta/AttributeMetaMediatorFactory'
+]
+List<String> unusedVolmLibClassEntries = unusedVolmLibClasses.collectMany { String classPath ->
+    [classPath + '.class', classPath + '$*.class']
+}
+
+// Annotation-only artifacts pulled in transitively by Gson and Caffeine. Their types appear solely
+// in annotation attributes, which the JVM skips silently when the type is absent, so nothing loads
+// or links against them at runtime.
+List<String> annotationOnlyArtifacts = [
+    'com/google/errorprone/**',
+    'org/jspecify/**'
+]
+
+// Publisher metadata for the shaded dependencies. Nothing reads these at runtime.
+List<String> dependencyBuildMetadata = [
+    'META-INF/maven/**',
+    'META-INF/proguard/**',
+    'META-INF/versions/*/OSGI-INF/**'
+]
+
+String languageTomlSupportClassPattern = 'art/arcane/volmlib/util/config/(?:TomlCodec|ConfigJson|ConfigExposePolicy|ConfigDoc|ConfigDescription|ConfigDocumentation)(?:\\$[^/]+)?\\.class'
+
+tasks.named('shadowJar', com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar).configure {
+    inputs.property('languageTomlSupportClassPattern', languageTomlSupportClassPattern)
+    dependsOn(embeddedAgentJar)
+    mergeServiceFiles()
+    // minimize() stays off. Caffeine reaches its 520 generated cache and node classes through
+    // MethodHandles.Lookup.findClass on a computed name, and the VolmLib command, GUI and hotload
+    // surfaces are only referenced from :adapters:bukkit:plugin, which is merged into the artifact
+    // after this task runs. Both would be stripped as unreachable. Excluding them from minimization
+    // leaves it reaching ~25KB of Gson internals, which is not worth a mode that fails silently.
+    relocate('com.dfsek.paralithic', "${lib}.paralithic")
+    relocate('io.github.slimjar', "${lib}.slimjar")
+    relocate('com.moandjiezana.toml', "${lib}.toml")
+    exclude('modules/loader-agent.isolated-jar')
+    exclude(unusedVolmLibPackages)
+    exclude { FileTreeElement entry ->
+        !entry.isDirectory() && entry.path.startsWith('art/arcane/volmlib/util/config/')
+                && !entry.path.matches(languageTomlSupportClassPattern)
+    }
+    exclude(unusedVolmLibClassEntries)
+    exclude(annotationOnlyArtifacts)
+    exclude(dependencyBuildMetadata)
+    from(embeddedAgentJar.map { it.archiveFile }) {
+        rename { String ignored -> 'agent.jar' }
+    }
+}
+
+rootProject.tasks.matching {
+    it.name == 'prepareKotlinBuildScriptModel'
+}.configureEach {
+    dependsOn(generateTemplates)
+}
+
+sourceSets {
+    main {
+        java {
+            srcDir(generateTemplates.map { it.outputs })
+        }
+    }
+    externalProviderTest {
+        compileClasspath += sourceSets.test.compileClasspath + sourceSets.main.output
+        runtimeClasspath += sourceSets.test.runtimeClasspath + sourceSets.main.output
+    }
+}
+
+dependencies {
+    externalProviderTestImplementation(libs.craftengine.core) {
+        transitive = false
+    }
+    externalProviderTestImplementation(libs.craftengine.bukkit) {
+        transitive = false
+    }
+    externalProviderTestImplementation('net.momirealms:sparrow-nbt:0.22')
+    externalProviderTestImplementation('net.momirealms:sparrow-util:0.121')
+    externalProviderTestImplementation('net.momirealms:sparrow-reflection:0.33')
+    externalProviderTestImplementation('net.momirealms:sparrow-yaml:1.0.18')
+    externalProviderTestImplementation('net.momirealms:antigrieflib:1.0.17')
+    externalProviderTestImplementation('org.incendo:cloud-core:2.0.0')
+    externalProviderTestImplementation(libs.oraxen) {
+        transitive = false
+    }
+    externalProviderTestImplementation(libs.itemsadder) {
+        transitive = false
+    }
+}
+
+tasks.register('externalProviderTest', Test) {
+    testClassesDirs = sourceSets.externalProviderTest.output.classesDirs
+    classpath = sourceSets.externalProviderTest.runtimeClasspath
+    jvmArgs('--add-modules', 'jdk.incubator.vector')
+}
+
+tasks.named('check').configure {
+    dependsOn('externalProviderTest')
+}
+
+Closure<Void> registerPurityRatchet = { String taskName, String label, String forbiddenPackage, String allowlistName ->
+    tasks.register(taskName) {
+        group = 'verification'
+        description = "Fails if files outside core/${allowlistName} import ${forbiddenPackage} (the allowlist only shrinks)."
+        File allowlistFile = project.file(allowlistName)
+        File sourceRoot = project.file('src/main/java')
+        inputs.file(allowlistFile)
+        inputs.dir(sourceRoot)
+        doLast {
+            Set<String> allowed = allowlistFile.readLines().findAll { String line -> !line.isBlank() }.toSet()
+            List<String> offenders = new ArrayList<>()
+            List<String> coupled = new ArrayList<>()
+            sourceRoot.eachFileRecurse { File f ->
+                if (!f.name.endsWith('.java')) {
+                    return
+                }
+                if (f.text.contains(forbiddenPackage)) {
+                    String rel = sourceRoot.toPath().relativize(f.toPath()).toString()
+                    coupled.add(rel)
+                    if (!allowed.contains(rel)) {
+                        offenders.add(rel)
+                    }
+                }
+            }
+            if (!offenders.isEmpty()) {
+                throw new GradleException(label + " purity ratchet violated - new " + forbiddenPackage + " coupling in:\n  " + offenders.join('\n  ') + "\nDecouple these files or (only with strong justification) add them to core/" + allowlistName)
+            }
+            int shrunk = allowed.size() - coupled.size()
+            if (shrunk > 0) {
+                println(label + " purity ratchet: " + coupled.size() + " coupled files (" + shrunk + " fewer than allowlist - consider tightening core/" + allowlistName + ")")
+            } else {
+                println(label + " purity ratchet: " + coupled.size() + " coupled files (at allowlist ceiling)")
+            }
+        }
+    }
+    return null
+}
+
+registerPurityRatchet('bukkitPurityRatchet', 'Bukkit', 'org.bukkit', 'purity-allowlist.txt')
+registerPurityRatchet('minecraftPurityRatchet', 'Minecraft', 'net.minecraft', 'minecraft-purity-allowlist.txt')
+
+tasks.named('check').configure {
+    dependsOn('bukkitPurityRatchet', 'minecraftPurityRatchet')
+}
+
+apply from: rootProject.file('gradle/generation-build-revision.gradle')

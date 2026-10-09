@@ -1,0 +1,6 @@
+{
+  "name": "Bottom",
+  "landBiomes": ["bottom"],
+  "seaBiomes": ["bottom"],
+  "shoreBiomes": ["bottom"]
+}

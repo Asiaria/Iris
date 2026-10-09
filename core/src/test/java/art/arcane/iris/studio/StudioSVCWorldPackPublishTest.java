@@ -1,0 +1,618 @@
+package art.arcane.iris.studio;
+
+import art.arcane.iris.pack.PackFingerprints;
+
+import art.arcane.iris.pack.datapack.ServerConfigurator;
+import art.arcane.iris.pack.loading.IrisData;
+import art.arcane.iris.pack.AtomicDirectoryPublisher;
+import art.arcane.iris.pack.BrokenPackException;
+import art.arcane.iris.pack.PackValidationCache;
+import art.arcane.iris.pack.PackValidationRegistry;
+import art.arcane.iris.pack.PackValidationResult;
+import art.arcane.iris.pack.PackValidator;
+import art.arcane.iris.generation.runtime.PreservationRegistry;
+import art.arcane.iris.generation.terrain.IrisDimension;
+import art.arcane.iris.platform.bukkit.plugin.VolmitSender;
+import art.arcane.iris.spi.IrisLogging;
+import art.arcane.iris.spi.IrisServices;
+import art.arcane.iris.world.history.GenerationHistory;
+import art.arcane.iris.world.history.GenerationPackFingerprint;
+import art.arcane.iris.world.task.J;
+import art.arcane.iris.testsupport.PlatformLeakGuard;
+import org.junit.Assume;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.ClassRule;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.mockito.MockedStatic;
+
+import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+public class StudioSVCWorldPackPublishTest {
+    @ClassRule
+    public static final PlatformLeakGuard PLATFORM_GUARD = PlatformLeakGuard.clean();
+
+    @Rule
+    public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+    @Before
+    public void registerPreservationService() {
+        IrisServices.register(PreservationRegistry.class, mock(PreservationRegistry.class));
+    }
+
+    @After
+    public void clearValidationRegistry() {
+        PackValidationRegistry.clear();
+        IrisServices.remove(PreservationRegistry.class);
+    }
+
+    @Test
+    public void brokenSourceIsRejectedBeforeOpeningOrChangingWorldHistory() throws Exception {
+        Path source = temporaryFolder.newFolder("invalid-generation-update").toPath();
+        writeValidPack(source);
+        Files.writeString(source.resolve("biomes/biome.json"), "{");
+        Path world = temporaryFolder.newFolder("untouched-generation-world").toPath();
+        Files.writeString(world.resolve("level.dat"), "world-state");
+        IrisData sourceData = mock(IrisData.class);
+        when(sourceData.getDataFolder()).thenReturn(source.toFile());
+        IrisDimension dimension = new IrisDimension();
+        dimension.setLoadKey("main");
+        dimension.setLoader(sourceData);
+        VolmitSender sender = mock(VolmitSender.class);
+
+        try (MockedStatic<J> scheduler = mockStatic(J.class);
+             MockedStatic<IrisLogging> logging = mockStatic(IrisLogging.class);
+             MockedStatic<GenerationHistory> history = mockStatic(GenerationHistory.class);
+             MockedStatic<ServerConfigurator> configurator = mockStatic(ServerConfigurator.class)) {
+            assertNull(new StudioSVC().replaceIntoWorld(sender, dimension, world.toFile(), 42L));
+
+            history.verifyNoInteractions();
+            configurator.verifyNoInteractions();
+            assertFalse(Files.exists(world.resolve("iris")));
+            assertEquals("world-state", Files.readString(world.resolve("level.dat")));
+            assertTrue(PackValidationRegistry.isBroken(source));
+        }
+    }
+
+    @Test
+    public void copiesToStageAndPublishesTheCompletePack() throws IOException {
+        Path root = temporaryFolder.newFolder("world").toPath();
+        Path source = root.resolve("source");
+        Path stage = root.resolve("iris/.pack.installing-test");
+        Path target = root.resolve("iris/pack");
+        Files.createDirectories(source.resolve("dimensions"));
+        Files.writeString(source.resolve("dimensions/example.json"), "{}");
+        Files.writeString(source.resolve("dimensions/.hidden.json"), "{}");
+        Files.createDirectories(source.resolve(".iris/schema"));
+        Files.createDirectories(source.resolve(".git/objects"));
+        Files.writeString(source.resolve(".iris/schema/generated.json"), "{}");
+        Files.writeString(source.resolve(".git/objects/blob"), "metadata");
+        Files.writeString(source.resolve("source.code-workspace"), "{}");
+        Files.createDirectories(stage);
+
+        StudioSVC.copyPackTree(source, stage);
+        assertFalse(Files.exists(target));
+        StudioSVC.publishNewDirectory(stage, target);
+
+        assertFalse(Files.exists(stage));
+        assertTrue(Files.isRegularFile(target.resolve("dimensions/example.json")));
+        assertTrue(Files.isRegularFile(target.resolve("dimensions/.hidden.json")));
+        assertFalse(Files.exists(target.resolve(".iris")));
+        assertFalse(Files.exists(target.resolve(".git")));
+        assertFalse(Files.exists(target.resolve("source.code-workspace")));
+    }
+
+    @Test
+    public void existingPartialTargetIsNeverReplacedOrMerged() throws IOException {
+        Path root = temporaryFolder.newFolder("existing-world").toPath();
+        Path stage = root.resolve("iris/.pack.installing-test");
+        Path target = root.resolve("iris/pack");
+        Files.createDirectories(stage);
+        Files.writeString(stage.resolve("new.txt"), "new");
+        Files.createDirectories(target);
+        Files.writeString(target.resolve("sentinel.txt"), "keep");
+
+        assertThrows(FileAlreadyExistsException.class, () -> StudioSVC.publishNewDirectory(stage, target));
+
+        assertEquals("keep", Files.readString(target.resolve("sentinel.txt")));
+        assertFalse(Files.exists(target.resolve("new.txt")));
+        assertTrue(Files.exists(stage.resolve("new.txt")));
+    }
+
+    @Test
+    public void symbolicLinksInSourceAreRejectedBeforePublish() throws IOException {
+        Path root = temporaryFolder.newFolder("linked-source").toPath();
+        Path source = root.resolve("source");
+        Path stage = root.resolve("stage");
+        Path outside = root.resolve("outside.txt");
+        Files.createDirectories(source);
+        Files.createDirectories(stage);
+        Files.writeString(outside, "outside");
+        try {
+            Files.createSymbolicLink(source.resolve("link.txt"), outside);
+        } catch (IOException | UnsupportedOperationException e) {
+            Assume.assumeNoException(e);
+        }
+
+        assertThrows(IOException.class, () -> StudioSVC.copyPackTree(source, stage));
+        assertFalse(Files.exists(stage.resolve("link.txt")));
+    }
+
+    @Test
+    public void rootPackSymlinkResolvesWhileNestedLinksRemainRejected() throws IOException {
+        Path root = temporaryFolder.newFolder("linked-pack-root").toPath();
+        Path source = root.resolve("source");
+        Path linkedSource = root.resolve("linked_source");
+        Path stage = root.resolve("stage");
+        Files.createDirectories(source.resolve("dimensions"));
+        Files.writeString(source.resolve("dimensions/example.json"), "{}");
+        Files.createDirectories(stage);
+        try {
+            Files.createSymbolicLink(linkedSource, source);
+        } catch (IOException | UnsupportedOperationException e) {
+            Assume.assumeNoException(e);
+        }
+
+        Path resolved = StudioSVC.resolveSafePackSource(linkedSource.toFile());
+        StudioSVC.copyPackTree(resolved, stage);
+
+        assertEquals(source.toRealPath(), resolved);
+        assertTrue(Files.isRegularFile(stage.resolve("dimensions/example.json")));
+    }
+
+    @Test
+    public void copyRejectsAnInstallationStageInsideTheSource() throws IOException {
+        Path source = temporaryFolder.newFolder("overlapping-copy").toPath();
+        Path stage = source.resolve("nested-stage");
+        Files.writeString(source.resolve("pack.txt"), "source");
+
+        IOException failure = assertThrows(
+                IOException.class,
+                () -> StudioSVC.copyPackTree(source, stage));
+
+        assertTrue(failure.getMessage().contains("overlap"));
+        assertFalse(Files.exists(stage));
+        assertEquals("source", Files.readString(source.resolve("pack.txt")));
+    }
+
+    @Test
+    public void copyRejectsASymbolicInstallationStage() throws IOException {
+        Path root = temporaryFolder.newFolder("linked-copy-stage").toPath();
+        Path source = root.resolve("source");
+        Path outside = root.resolve("outside");
+        Path stage = root.resolve("stage");
+        Files.createDirectories(source);
+        Files.createDirectories(outside);
+        Files.writeString(source.resolve("pack.txt"), "source");
+        try {
+            Files.createSymbolicLink(stage, outside);
+        } catch (IOException | UnsupportedOperationException exception) {
+            Assume.assumeNoException(exception);
+        }
+
+        IOException failure = assertThrows(
+                IOException.class,
+                () -> StudioSVC.copyPackTree(source, stage));
+
+        assertTrue(failure.getMessage().contains("symbolic link"));
+        assertFalse(Files.exists(outside.resolve("pack.txt")));
+    }
+
+    @Test
+    public void replaceExistingRejectsSymbolicTargetBeforePublication() throws Exception {
+        Path root = temporaryFolder.newFolder("symbolic-replacement-target").toPath();
+        Path outside = root.resolve("outside-pack");
+        Path target = root.resolve("world/iris/pack");
+        Files.createDirectories(outside);
+        Files.createDirectories(target.getParent());
+        Files.writeString(outside.resolve("sentinel.txt"), "unchanged");
+        try {
+            Files.createSymbolicLink(target, outside);
+        } catch (IOException | UnsupportedOperationException | SecurityException exception) {
+            Assume.assumeNoException(exception);
+        }
+        PackValidationResult existingValidation = new PackValidationResult(
+                "pack", List.of(), List.of("existing target"), 29L);
+        PackValidationRegistry.publish(target, existingValidation);
+
+        IOException failure = assertThrows(
+                IOException.class,
+                () -> StudioSVC.requireSafePublicationTarget(target, true));
+
+        assertTrue(failure.getMessage().contains("symbolic link"));
+        assertTrue(Files.isSymbolicLink(target));
+        assertEquals(outside.toRealPath(), target.toRealPath());
+        assertEquals("unchanged", Files.readString(outside.resolve("sentinel.txt")));
+        assertSame(existingValidation, PackValidationRegistry.requireLoadable(target));
+    }
+
+    @Test
+    public void rejectedPublicationEvictsCreatedLoaderBeforeDiskRollback() throws IOException {
+        Path root = temporaryFolder.newFolder("cache-rollback").toPath();
+        Path target = root.resolve("pack");
+        Path stage = root.resolve("stage");
+        Files.createDirectories(target);
+        Files.writeString(target.resolve("sentinel.txt"), "previous");
+        Files.createDirectories(stage);
+        Files.writeString(stage.resolve("rejected.txt"), "rejected");
+        AtomicDirectoryPublisher.Publication publication = AtomicDirectoryPublisher.publish(stage, target);
+        IrisData createdData = IrisData.get(target.toFile());
+
+        assertSame(createdData, IrisData.getLoaded(target.toFile()).orElse(null));
+        StudioSVC.rollbackFailedPublication(createdData, publication, new IOException("validation failed"));
+
+        assertTrue(IrisData.getLoaded(target.toFile()).isEmpty());
+        assertEquals("previous", Files.readString(target.resolve("sentinel.txt")));
+        assertFalse(Files.exists(target.resolve("rejected.txt")));
+    }
+
+    @Test
+    public void finalPublishedSnapshotReplacesStalePathValidation() throws Exception {
+        Path packRoot = temporaryFolder.newFolder("published-snapshot", "iris", "pack").toPath();
+        writeValidPack(packRoot);
+        PackValidationResult staleFailure = new PackValidationResult(
+                "pack", List.of("stale failure"), List.of(), 1L);
+        PackValidationRegistry.publish(packRoot, staleFailure);
+
+        PackValidationResult validated = StudioSVC.validatePublishedPack(packRoot);
+
+        assertTrue(validated.isLoadable());
+        assertSame(validated, PackValidationRegistry.requireLoadable(packRoot));
+
+        Files.writeString(packRoot.resolve("dimensions/main.json"), "{");
+        assertThrows(BrokenPackException.class, () -> StudioSVC.validatePublishedPack(packRoot));
+        assertTrue(PackValidationRegistry.isBroken(packRoot));
+    }
+
+    @Test
+    public void unchangedGenerationCandidateReusesStartupValidation() throws Exception {
+        Path source = temporaryFolder.newFolder("validated-generation-source").toPath();
+        writeValidPack(source);
+        PackValidationResult validation = new PackValidationResult(
+                "validated-generation-source", List.of(), List.of("retained warning"), 31L);
+        PackValidationRegistry.publish(source, validation,
+                PackFingerprints.computePackTreeFingerprint(source.toFile()), PackValidationCache.contextFingerprint());
+        String fingerprint = GenerationPackFingerprint.compute(source, GenerationPackFingerprint.CURRENT_VERSION);
+
+        try (MockedStatic<PackValidator> validator = mockStatic(PackValidator.class)) {
+            assertSame(validation, StudioSVC.validateGenerationCandidate(source, fingerprint));
+            validator.verifyNoInteractions();
+        }
+        assertSame(validation, PackValidationRegistry.getMatching(source, fingerprint));
+    }
+
+    @Test
+    public void newlyValidatedGenerationCandidateReusesSemanticValidationForExactCopy() throws Exception {
+        Path source = temporaryFolder.newFolder("fresh-validation-source").toPath();
+        Path target = temporaryFolder.getRoot().toPath().resolve("fresh-validation-target");
+        writeValidPack(source);
+        String fingerprint = GenerationPackFingerprint.compute(source, GenerationPackFingerprint.CURRENT_VERSION);
+        PackValidationResult sourceValidation = new PackValidationResult(
+                "fresh-validation-source", List.of(), List.of("source warning"), 43L);
+        PackValidationResult duplicateValidation = new PackValidationResult(
+                "fresh-validation-target", List.of(), List.of("duplicate warning"), 47L);
+        try (MockedStatic<PackValidator> validator = mockStatic(PackValidator.class)) {
+            validator.when(() -> PackValidator.validate(source.toFile())).thenReturn(sourceValidation);
+            validator.when(() -> PackValidator.validate(target.toFile())).thenReturn(duplicateValidation);
+            assertSame(sourceValidation, StudioSVC.validateGenerationCandidate(source, fingerprint));
+            StudioSVC.copyPackTree(source, target);
+            String copiedFingerprint = PackFingerprints.computePackTreeFingerprint(target.toFile());
+
+            assertSame(sourceValidation, StudioSVC.validatePublishedPack(target, source, copiedFingerprint));
+            validator.verify(() -> PackValidator.validate(source.toFile()));
+            validator.verifyNoMoreInteractions();
+        }
+    }
+
+    @Test
+    public void sourceChangedDuringSemanticValidationCannotPublishReusableResult() throws Exception {
+        Path source = temporaryFolder.newFolder("changing-validation-source").toPath();
+        writeValidPack(source);
+        String fingerprint = GenerationPackFingerprint.compute(source, GenerationPackFingerprint.CURRENT_VERSION);
+        PackValidationResult validation = new PackValidationResult(
+                "changing-validation-source", List.of(), List.of(), 53L);
+        try (MockedStatic<PackValidator> validator = mockStatic(PackValidator.class)) {
+            validator.when(() -> PackValidator.validate(source.toFile())).thenAnswer(invocation -> {
+                Files.writeString(source.resolve("dimensions/main.json"), "{\"name\":\"changed\"}");
+                return validation;
+            });
+
+            assertThrows(IllegalStateException.class,
+                    () -> StudioSVC.validateGenerationCandidate(source, fingerprint));
+            assertNull(PackValidationRegistry.get(source));
+            assertNull(PackValidationRegistry.getMatching(source,
+                    PackFingerprints.computePackTreeFingerprint(source.toFile())));
+        }
+    }
+
+    @Test
+    public void registryContextChangedDuringSemanticValidationCannotPublishReusableResult() throws Exception {
+        Path source = temporaryFolder.newFolder("changing-context-source").toPath();
+        writeValidPack(source);
+        String fingerprint = GenerationPackFingerprint.compute(source, GenerationPackFingerprint.CURRENT_VERSION);
+        PackValidationResult validation = new PackValidationResult(
+                "changing-context-source", List.of(), List.of(), 59L);
+        try (MockedStatic<PackValidator> validator = mockStatic(PackValidator.class);
+             MockedStatic<PackValidationCache> context = mockStatic(PackValidationCache.class)) {
+            validator.when(() -> PackValidator.validate(source.toFile())).thenReturn(validation);
+            context.when(PackValidationCache::contextFingerprint).thenReturn("before", "after");
+
+            assertThrows(IllegalStateException.class,
+                    () -> StudioSVC.validateGenerationCandidate(source, fingerprint));
+            assertNull(PackValidationRegistry.get(source));
+        }
+    }
+
+    @Test
+    public void editedGenerationCandidateCannotReuseStartupValidation() throws Exception {
+        Path source = temporaryFolder.newFolder("edited-generation-source").toPath();
+        writeValidPack(source);
+        PackValidationRegistry.publish(source, new PackValidationResult(
+                        "edited-generation-source", List.of(), List.of(), 37L),
+                PackFingerprints.computePackTreeFingerprint(source.toFile()), PackValidationCache.contextFingerprint());
+        Files.writeString(source.resolve("dimensions/main.json"), "{");
+        String fingerprint = GenerationPackFingerprint.compute(source, GenerationPackFingerprint.CURRENT_VERSION);
+
+        assertThrows(BrokenPackException.class,
+                () -> StudioSVC.validateGenerationCandidate(source, fingerprint));
+        assertTrue(PackValidationRegistry.isBroken(source));
+    }
+
+    @Test
+    public void unchangedBrokenGenerationCandidateRetainsValidationFailure() throws Exception {
+        Path source = temporaryFolder.newFolder("rejected-generation-source").toPath();
+        writeValidPack(source);
+        PackValidationResult validation = new PackValidationResult(
+                "rejected-generation-source", List.of("registry content unavailable"), List.of(), 41L);
+        PackValidationRegistry.publish(source, validation,
+                PackFingerprints.computePackTreeFingerprint(source.toFile()), PackValidationCache.contextFingerprint());
+        String fingerprint = GenerationPackFingerprint.compute(source, GenerationPackFingerprint.CURRENT_VERSION);
+
+        try (MockedStatic<PackValidator> validator = mockStatic(PackValidator.class)) {
+            assertThrows(BrokenPackException.class,
+                    () -> StudioSVC.validateGenerationCandidate(source, fingerprint));
+            validator.verifyNoInteractions();
+        }
+        assertSame(validation, PackValidationRegistry.getMatching(source, fingerprint));
+    }
+
+    @Test
+    public void exactCopiedFingerprintReusesSourceSemanticValidation() throws Exception {
+        Path root = temporaryFolder.newFolder("matching-validation-copy").toPath();
+        Path source = root.resolve("source");
+        Path target = root.resolve("target");
+        writeValidPack(source);
+        StudioSVC.copyPackTree(source, target);
+        String sourceFingerprint = PackFingerprints.computePackTreeFingerprint(source.toFile());
+        String copiedFingerprint = PackFingerprints.computePackTreeFingerprint(target.toFile());
+        PackValidationResult sourceValidation = new PackValidationResult(
+                "source", List.of(), List.of("preserved source warning"), 17L);
+        PackValidationRegistry.publish(source, sourceValidation, sourceFingerprint, PackValidationCache.contextFingerprint());
+
+        PackValidationResult reused = StudioSVC.validatePublishedPack(
+                target,
+                source,
+                copiedFingerprint);
+
+        assertEquals(sourceFingerprint, copiedFingerprint);
+        assertSame(sourceValidation, reused);
+        assertSame(sourceValidation, PackValidationRegistry.requireLoadable(target));
+    }
+
+    @Test
+    public void immutableSnapshotDimensionLoadingReusesExactSourceValidation() throws Exception {
+        Path source = temporaryFolder.newFolder("snapshot-source").toPath();
+        Path target = temporaryFolder.getRoot().toPath().resolve("snapshot-target");
+        writeValidPack(source);
+        StudioSVC.copyPackTree(source, target);
+        PackValidationResult sourceValidation = new PackValidationResult(
+                "snapshot-source", List.of(), List.of("source warning"), 23L);
+        PackValidationRegistry.publish(source, sourceValidation,
+                PackFingerprints.computePackTreeFingerprint(source.toFile()), PackValidationCache.contextFingerprint());
+
+        IrisData installed = IrisData.openDatapackCompiler(target.toFile());
+        try (MockedStatic<IrisData> data = mockStatic(IrisData.class, CALLS_REAL_METHODS)) {
+            data.when(() -> IrisData.get(target.toFile())).thenReturn(installed);
+
+            assertEquals("main", StudioSVC.loadInstalledDimension(target, source, "main").getLoadKey());
+            assertSame(sourceValidation, PackValidationRegistry.requireLoadable(target));
+        } finally {
+            installed.close();
+        }
+    }
+
+    @Test
+    public void immutableSnapshotDimensionLoadingRejectsChangedContent() throws Exception {
+        Path source = temporaryFolder.newFolder("changed-snapshot-source").toPath();
+        Path target = temporaryFolder.getRoot().toPath().resolve("changed-snapshot-target");
+        writeValidPack(source);
+        StudioSVC.copyPackTree(source, target);
+        PackValidationRegistry.publish(source, new PackValidationResult("snapshot-source", List.of(), List.of(), 29L),
+                PackFingerprints.computePackTreeFingerprint(source.toFile()), PackValidationCache.contextFingerprint());
+        Files.writeString(target.resolve("dimensions/main.json"), "{");
+
+        assertThrows(BrokenPackException.class, () -> StudioSVC.loadInstalledDimension(target, source, "main"));
+        assertTrue(PackValidationRegistry.isBroken(target));
+    }
+
+    @Test
+    public void copiedFingerprintMismatchFallsBackToTargetValidation() throws Exception {
+        Path root = temporaryFolder.newFolder("mismatched-validation-copy").toPath();
+        Path source = root.resolve("source");
+        Path target = root.resolve("target");
+        writeValidPack(source);
+        StudioSVC.copyPackTree(source, target);
+        String sourceFingerprint = PackFingerprints.computePackTreeFingerprint(source.toFile());
+        PackValidationResult sourceValidation = new PackValidationResult(
+                "source", List.of(), List.of(), 19L);
+        PackValidationRegistry.publish(source, sourceValidation, sourceFingerprint, PackValidationCache.contextFingerprint());
+        Files.writeString(target.resolve("dimensions/main.json"), "{");
+        String copiedFingerprint = PackFingerprints.computePackTreeFingerprint(target.toFile());
+
+        assertFalse(sourceFingerprint.equals(copiedFingerprint));
+        assertThrows(BrokenPackException.class, () -> StudioSVC.validatePublishedPack(
+                target,
+                source,
+                copiedFingerprint));
+        assertTrue(PackValidationRegistry.isBroken(target));
+        assertSame(sourceValidation, PackValidationRegistry.requireLoadable(source));
+    }
+
+    @Test
+    public void replacementKeepsTargetUnauthorizedThroughPublishedFingerprintWindow() throws Exception {
+        Path root = temporaryFolder.newFolder("validation-publication-window").toPath();
+        Path sourcePack = root.resolve("source");
+        Path target = root.resolve("world/iris/pack");
+        Path stage = root.resolve("world/iris/.pack.installing-test");
+        writeValidPack(sourcePack);
+        writeValidPack(target);
+        StudioSVC.copyPackTree(sourcePack, stage);
+        String sourceFingerprint = PackFingerprints.computePackTreeFingerprint(sourcePack.toFile());
+        PackValidationResult sourceValidation = new PackValidationResult(
+                "source", List.of(), List.of(), 23L);
+        PackValidationResult staleTargetValidation = new PackValidationResult(
+                "pack", List.of(), List.of("stale target"), 11L);
+        PackValidationRegistry.publish(sourcePack, sourceValidation, sourceFingerprint, PackValidationCache.contextFingerprint());
+        PackValidationRegistry.publish(target, staleTargetValidation);
+        assertSame(staleTargetValidation, PackValidationRegistry.requireLoadable(target));
+
+        AtomicDirectoryPublisher.Publication publication = null;
+        try (PackValidationRegistry.RootMutation validationMutation =
+                     PackValidationRegistry.beginRootMutation(target)) {
+            assertNull(PackValidationRegistry.get(target));
+            assertThrows(BrokenPackException.class, () -> PackValidationRegistry.requireLoadable(target));
+            publication = AtomicDirectoryPublisher.publish(stage, target);
+            assertNull(PackValidationRegistry.get(target));
+            String copiedFingerprint = PackFingerprints.computePackTreeFingerprint(target.toFile());
+            assertNull(PackValidationRegistry.get(target));
+            assertThrows(BrokenPackException.class, () -> PackValidationRegistry.requireLoadable(target));
+
+            PackValidationResult staged = validationMutation.stageMatchingCopy(
+                    sourcePack,
+                    copiedFingerprint);
+
+            assertSame(sourceValidation, staged);
+            assertNull(PackValidationRegistry.get(target));
+            publication.commit();
+            assertNull(PackValidationRegistry.get(target));
+            validationMutation.commit();
+            assertSame(sourceValidation, PackValidationRegistry.requireLoadable(target));
+            publication.cleanupBackup();
+        } finally {
+            if (publication != null) {
+                publication.close();
+            }
+        }
+    }
+
+    @Test
+    public void createdProjectRollbackEvictsOnlyItsCachedLoaderBeforeDeletion() throws IOException {
+        Path root = temporaryFolder.newFolder("project-cache-rollback").toPath();
+        Path project = root.resolve("created_project");
+        Path sibling = root.resolve("existing_project");
+        Files.createDirectories(project.resolve("dimensions"));
+        Files.writeString(project.resolve("dimensions/created_project.json"), "{}");
+        Files.createDirectories(sibling.resolve("dimensions"));
+        Files.writeString(sibling.resolve("dimensions/existing_project.json"), "{}");
+        IrisData createdData = IrisData.get(project.toFile());
+        IrisData siblingData = IrisData.get(sibling.toFile());
+
+        try {
+            assertSame(createdData, IrisData.getLoaded(project.toFile()).orElse(null));
+            assertNull(StudioSVC.rollbackCreatedProjectFiles(project.toFile()));
+
+            assertTrue(IrisData.getLoaded(project.toFile()).isEmpty());
+            assertFalse(Files.exists(project));
+            assertSame(siblingData, IrisData.getLoaded(sibling.toFile()).orElse(null));
+            assertTrue(Files.isDirectory(sibling));
+        } finally {
+            IrisData.getLoaded(project.toFile()).ifPresent(IrisData::close);
+            IrisData.getLoaded(sibling.toFile()).ifPresent(IrisData::close);
+        }
+    }
+
+    @Test
+    public void studioTransitionsWaitForTheInFlightOpenBeforeReplacement() {
+        StudioSVC.StudioTransitionQueue transitions = new StudioSVC.StudioTransitionQueue();
+        CompletableFuture<String> firstGate = new CompletableFuture<>();
+        CompletableFuture<String> secondGate = new CompletableFuture<>();
+        List<String> events = new ArrayList<>();
+
+        CompletableFuture<String> first = transitions.submit(() -> {
+            events.add("first-start");
+            return firstGate;
+        });
+        CompletableFuture<String> second = transitions.submit(() -> {
+            events.add("second-start");
+            return secondGate;
+        });
+
+        assertEquals(List.of("first-start"), events);
+        assertFalse(first.isDone());
+        assertFalse(second.isDone());
+
+        firstGate.complete("first");
+        assertEquals(List.of("first-start", "second-start"), events);
+        assertEquals("first", first.join());
+        assertFalse(second.isDone());
+
+        secondGate.complete("second");
+        assertEquals("second", second.join());
+    }
+
+    @Test
+    public void externallyCompletedTransitionStillHoldsTheQueueUntilItsOperationSettles() {
+        StudioSVC.StudioTransitionQueue transitions = new StudioSVC.StudioTransitionQueue();
+        CompletableFuture<String> firstGate = new CompletableFuture<>();
+        CompletableFuture<String> secondGate = new CompletableFuture<>();
+        List<String> events = new ArrayList<>();
+
+        CompletableFuture<String> first = transitions.submit(() -> {
+            events.add("first-start");
+            return firstGate;
+        });
+        CompletableFuture<String> second = transitions.submit(() -> {
+            events.add("second-start");
+            return secondGate;
+        });
+
+        assertTrue(first.completeExceptionally(new IllegalStateException("public timeout")));
+        assertEquals(List.of("first-start"), events);
+        assertFalse(second.isDone());
+
+        firstGate.complete("late-first");
+        assertEquals(List.of("first-start", "second-start"), events);
+        assertFalse(second.isDone());
+
+        secondGate.complete("second");
+        assertEquals("second", second.join());
+    }
+
+    private static void writeValidPack(Path packRoot) throws Exception {
+        Files.createDirectories(packRoot.resolve("dimensions"));
+        Files.createDirectories(packRoot.resolve("regions"));
+        Files.createDirectories(packRoot.resolve("biomes"));
+        Files.writeString(packRoot.resolve("dimensions/main.json"), "{\"regions\":[\"region\"]}");
+        Files.writeString(packRoot.resolve("regions/region.json"), "{\"landBiomes\":[\"biome\"]}");
+        Files.writeString(packRoot.resolve("biomes/biome.json"), "{\"name\":\"Biome\"}");
+    }
+}

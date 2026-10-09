@@ -1,0 +1,17 @@
+{
+  "name": "Middle Superflat",
+  "version": 1,
+  "mode": { "type": "SUPERFLAT" },
+  "regions": ["top"],
+  "focusRegion": "middle",
+  "focus": "",
+  "landChance": 1,
+  "environment": "NORMAL",
+  "dimensionHeight": { "min": -32, "max": 32 },
+  "logicalHeight": 64,
+  "fluidHeight": -32,
+  "bedrock": false,
+  "rockPalette": {
+    "palette": [{ "block": "minecraft:red_concrete" }]
+  }
+}

@@ -1,0 +1,23 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'art.arcane'
+version = rootProject.version
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+dependencies {
+    api('com.github.VolmitSoftware.VolmLib:native-api:master-SNAPSHOT') {
+        transitive = false
+    }
+    testImplementation('junit:junit:4.13.2')
+}
+
+tasks.named('jar', Jar).configure {
+    archiveBaseName.set('iris-spi')
+}

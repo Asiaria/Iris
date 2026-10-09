@@ -1,0 +1,103 @@
+import art.arcane.iris.buildtools.GenerationBuildRevision
+import art.arcane.iris.buildtools.GenerationRevisionScope
+import org.gradle.api.artifacts.Configuration
+import org.gradle.api.artifacts.ResolvedArtifact
+import org.gradle.api.tasks.TaskProvider
+import org.gradle.jvm.tasks.Jar
+
+import java.nio.file.Path
+
+Configuration kernelDependencies = configurations.create('generationKernelDependencies') {
+    canBeConsumed = false
+    canBeResolved = true
+    extendsFrom(configurations.implementation, configurations.slim, configurations.annotationProcessor)
+}
+dependencies.add(kernelDependencies.name, libs.guava)
+List<String> nativeRevisionModules = ['native-common', 'native-minecraft26_2-sources']
+for (String adapter : rootProject.extensions.extraProperties.get('nativeDevelopmentAdapters')) {
+    nativeRevisionModules.add('native-' + adapter)
+}
+for (String module : nativeRevisionModules) {
+    dependencies.add(kernelDependencies.name, "com.github.VolmitSoftware.VolmLib:${module}:master-SNAPSHOT") {
+        transitive = false
+    }
+}
+
+
+GenerationBuildRevision.CaptureOptions revisionScope = GenerationRevisionScope.current(rootProject.projectDir.toPath())
+File catalogFile = file('generation-kernels/catalog.tsv')
+TaskProvider<Jar> kernelAgentJar = project(':core:agent').tasks.named('jar', Jar)
+File generatedResources = layout.buildDirectory.dir('generated/generation-revision').get().asFile
+File generatedCatalog = new File(generatedResources, 'META-INF/iris/generation-kernels/catalog.tsv')
+File generatedRevision = new File(generatedResources, 'META-INF/iris/generation-kernels/abi-1.revision')
+
+Closure<Map<String, Path>> resolvedKernelDependencies = {
+    Map<String, Path> artifacts = new TreeMap<>()
+    for (ResolvedArtifact artifact : kernelDependencies.resolvedConfiguration.resolvedArtifacts) {
+        String group = artifact.moduleVersion.id.group
+        String name = artifact.moduleVersion.id.name
+        if (group == 'art.arcane' && name == 'spi') {
+            continue
+        }
+        boolean volmLib = (group == 'com.github.VolmitSoftware' && name == 'VolmLib')
+            || (group == 'com.github.VolmitSoftware.VolmLib' && name in ['shared', 'volmlib-shared'])
+            || (group == 'art.arcane' && name == 'shared')
+        String artifactName = group == 'com.github.VolmitSoftware.VolmLib' && name ==~ /v[0-9_]+R[0-9]+/
+            ? 'native-' + name : name
+        String key = volmLib ? 'volmlib' : "${group}:${artifactName}".toString()
+        if (artifact.classifier != null) {
+            key += ':' + artifact.classifier
+        }
+        if (artifacts.putIfAbsent(key, artifact.file.toPath()) != null) {
+            throw new GradleException("Duplicate generation dependency identity: ${key}")
+        }
+    }
+    if (!artifacts.containsKey('volmlib')) {
+        throw new GradleException('The generation revision must include the resolved VolmLib artifact.')
+    }
+    artifacts.put('iris-agent', kernelAgentJar.get().archiveFile.get().asFile.toPath())
+    return artifacts
+}
+
+TaskProvider<Task> revisionResources = tasks.register('generateGenerationBuildRevision') {
+    group = 'build'
+    description = 'Captures generation sources and resolved dependencies as build revision provenance.'
+    dependsOn(kernelDependencies, kernelAgentJar)
+    inputs.files(revisionScope.roots().collect { String source -> rootProject.file(source) })
+    inputs.property('revisionScope', revisionScope.toString())
+    inputs.files(catalogFile, kernelDependencies, kernelAgentJar.flatMap { Jar jar -> jar.archiveFile })
+    outputs.files(generatedRevision, generatedCatalog)
+    doLast {
+        GenerationBuildRevision.SourceManifest captured = GenerationBuildRevision.capture(revisionScope, resolvedKernelDependencies())
+        GenerationBuildRevision.verifyCatalog(catalogFile.toPath(), [(revisionScope.abi()): captured])
+        GenerationBuildRevision.write(generatedRevision.toPath(), captured)
+        generatedCatalog.text = catalogFile.getText('UTF-8')
+    }
+}
+
+TaskProvider<Task> verifyRevision = tasks.register('verifyGenerationBuildRevision') {
+    group = 'verification'
+    description = 'Verifies that the packaged revision describes the inputs of this build.'
+    dependsOn(revisionResources)
+    doLast {
+        GenerationBuildRevision.verifySnapshot(rootProject.projectDir.toPath(), generatedRevision.toPath(), resolvedKernelDependencies())
+        GenerationBuildRevision.verifyCatalog(generatedCatalog.toPath(), [(revisionScope.abi()): GenerationBuildRevision.read(generatedRevision.toPath())])
+    }
+}
+
+tasks.named('processResources').configure {
+    dependsOn(revisionResources)
+    from(generatedResources)
+}
+tasks.named('test', Test).configure {
+    dependsOn(revisionResources)
+    classpath = files(generatedResources) + classpath
+}
+tasks.named('check').configure { dependsOn(verifyRevision) }
+tasks.withType(Jar).configureEach { dependsOn(verifyRevision) }
+rootProject.tasks.named('check').configure { dependsOn(verifyRevision) }
+rootProject.tasks.withType(Jar).configureEach { dependsOn(verifyRevision) }
+rootProject.tasks.matching { Task task -> task.name in ['fabricJar', 'forgeJar', 'neoforgeJar'] }
+    .configureEach { dependsOn(verifyRevision) }
+rootProject.subprojects.findAll { Project candidate -> candidate.path.startsWith(':adapters:bukkit:') }
+    .each { Project adapter -> adapter.tasks.withType(Jar).configureEach { dependsOn(verifyRevision) } }

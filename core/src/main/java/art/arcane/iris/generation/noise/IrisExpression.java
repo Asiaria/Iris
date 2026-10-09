@@ -1,0 +1,184 @@
+/*
+ * Iris is a World Generator for Minecraft Bukkit Servers
+ * Copyright (c) 2022 Arcane Arts (Volmit Software)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package art.arcane.iris.generation.noise;
+
+import art.arcane.iris.spi.IrisLogging;
+import com.dfsek.paralithic.Expression;
+import com.dfsek.paralithic.eval.parser.Parser;
+import com.dfsek.paralithic.eval.parser.Scope;
+import art.arcane.iris.pack.loading.IrisRegistrant;
+import art.arcane.volmlib.util.cache.AtomicCache;
+import art.arcane.iris.generation.cache.LazyBoundedCache;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.Setter;
+import art.arcane.iris.generation.noise.IrisExpressionFunction.FunctionContext;
+import art.arcane.iris.pack.schema.annotation.ArrayType;
+import art.arcane.volmlib.util.documentation.Description;
+import art.arcane.iris.pack.schema.annotation.Required;
+import art.arcane.volmlib.util.collection.KList;
+import art.arcane.volmlib.util.math.RNG;
+import art.arcane.volmlib.util.stream.ProceduralStream;
+import art.arcane.volmlib.util.stream.interpolation.Interpolated;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.NoArgsConstructor;
+import lombok.experimental.Accessors;
+
+@Accessors(chain = true)
+@NoArgsConstructor
+@AllArgsConstructor
+@Description("Represents an Iris Expression")
+@Data
+@EqualsAndHashCode(callSuper = false)
+public class IrisExpression extends IrisRegistrant {
+    private static final int MAX_RETAINED_EVALUATION_DEPTH = 8;
+    private static final int MAX_RETAINED_ARGUMENTS = 256;
+
+    @ArrayType(type = IrisExpressionLoad.class, min = 1)
+    @Description("Variables to use in this expression")
+    private KList<IrisExpressionLoad> variables = new KList<>();
+
+    @ArrayType(type = IrisExpressionFunction.class, min = 1)
+    @Description("Functions to use in this expression")
+    private KList<IrisExpressionFunction> functions = new KList<>();
+
+    @Required
+    @Description("The expression. Inherited variables are x, y and z. Avoid using those variable names.")
+    private String expression;
+
+    private transient AtomicCache<Expression> expressionCache = new AtomicCache<>();
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
+    private final transient LazyBoundedCache<Long, ProceduralStream<Double>> streams = new LazyBoundedCache<>(8);
+
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
+    private final transient ThreadLocal<EvaluationScratch> evaluationScratch = ThreadLocal.withInitial(EvaluationScratch::new);
+
+    private Expression expression() {
+        return expressionCache.aquire(() -> {
+            Scope scope = new Scope(); // Create variable scope. This scope can hold both constants and invocation variables.
+            Parser parser = new Parser();
+
+            try {
+                for (IrisExpressionLoad i : variables) {
+                    scope.addInvocationVariable(i.getName());
+                }
+
+                scope.addInvocationVariable("x");
+                scope.addInvocationVariable("y");
+                scope.addInvocationVariable("z");
+            } catch (Throwable e) {
+                IrisLogging.reportError("Script variable load failed in " + getLoadFile().getPath() + ".", e);
+            }
+
+            for (IrisExpressionFunction f : functions) {
+                if (!f.isValid()) continue;
+                f.setData(getLoader());
+                parser.registerFunction(f.getName(), f);
+            }
+
+            try {
+                return parser.parse(getExpression(), scope);
+            } catch (Throwable e) {
+                IrisLogging.reportError("Script load failed in " + getLoadFile().getPath() + ".", e);
+            }
+
+            return null;
+        });
+    }
+
+    public ProceduralStream<Double> stream(RNG rng) {
+        return streams.computeIfAbsent(rng.getSeed(), seed -> {
+            RNG streamRng = new RNG(seed);
+            return ProceduralStream.of((x, z) -> evaluate(streamRng, x, z),
+                    (x, y, z) -> evaluate(streamRng, x, y, z), Interpolated.DOUBLE);
+        });
+    }
+
+    public double evaluate(RNG rng, double x, double z) {
+        EvaluationScratch scratch = evaluationScratch.get();
+        double[] arguments = scratch.acquire(3 + getVariables().size());
+        try {
+            int index = 0;
+            for (IrisExpressionLoad variable : getVariables()) {
+                arguments[index++] = variable.getValue(rng, getLoader(), x, z);
+            }
+            arguments[index++] = x;
+            arguments[index++] = z;
+            arguments[index] = -1;
+            return expression().evaluate(new FunctionContext(rng), arguments);
+        } finally {
+            scratch.release();
+        }
+    }
+
+    public double evaluate(RNG rng, double x, double y, double z) {
+        EvaluationScratch scratch = evaluationScratch.get();
+        double[] arguments = scratch.acquire(3 + getVariables().size());
+        try {
+            int index = 0;
+            for (IrisExpressionLoad variable : getVariables()) {
+                arguments[index++] = variable.getValue(rng, getLoader(), x, y, z);
+            }
+            arguments[index++] = x;
+            arguments[index++] = y;
+            arguments[index] = z;
+            return expression().evaluate(new FunctionContext(rng), arguments);
+        } finally {
+            scratch.release();
+        }
+    }
+
+    @Override
+    public String getFolderName() {
+        return "expressions";
+    }
+
+    @Override
+    public String getTypeName() {
+        return "Expression";
+    }
+
+    private static final class EvaluationScratch {
+        private final double[][] retained = new double[MAX_RETAINED_EVALUATION_DEPTH][];
+        private int depth;
+
+        private double[] acquire(int length) {
+            double[] arguments;
+            if (depth >= retained.length || length > MAX_RETAINED_ARGUMENTS) {
+                arguments = new double[length];
+            } else {
+                arguments = retained[depth];
+                if (arguments == null || arguments.length != length) {
+                    arguments = new double[length];
+                    retained[depth] = arguments;
+                }
+            }
+            depth++;
+            return arguments;
+        }
+
+        private void release() {
+            depth--;
+        }
+    }
+}

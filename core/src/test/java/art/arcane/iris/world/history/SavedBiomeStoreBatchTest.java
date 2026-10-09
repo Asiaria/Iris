@@ -1,0 +1,447 @@
+package art.arcane.iris.world.history;
+
+import art.arcane.iris.testsupport.Await;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.mockito.MockedConstruction;
+
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.nio.channels.FileChannel;
+import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.withSettings;
+
+public class SavedBiomeStoreBatchTest {
+    @Rule
+    public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+    @Test
+    public void gatheringWritesHandleZeroAndPartialProgressAcrossQueuedFrames() throws Exception {
+        Path root = temporaryFolder.newFolder().toPath();
+        SavedBiomeStore store = SavedBiomeStore.open(root);
+        store.claimAndPersist(chunk(0, 3L));
+        BatchControl control = new BatchControl();
+        control.maximumWriteBytes = 11;
+        control.zeroFirstWrite = true;
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        List<SavedBiomeChunk> claims = List.of(chunk(1, 3L), chunk(2, 3L), chunk(3, 3L));
+        try {
+            List<Future<ClaimResult>> results = enqueue(store, root, control, workers, claims);
+            assertTrue(control.writing.await(5, TimeUnit.SECONDS));
+            for (SavedBiomeChunk claim : claims) {
+                assertTrue(store.cached(claim.chunkX(), claim.chunkZ()).isEmpty());
+            }
+            control.release.countDown();
+            for (Future<ClaimResult> result : results) {
+                ClaimResult completed = result.get(5, TimeUnit.SECONDS);
+                assertTrue(completed.persisted());
+                assertNull(completed.failure());
+            }
+            assertEquals(3, control.maximumGathered.get());
+            assertTrue(control.writes.get() > claims.size());
+            assertEquals(0, control.forces.get());
+            SavedBiomeStore reopened = SavedBiomeStore.open(root);
+            for (SavedBiomeChunk claim : claims) {
+                assertEquals(claim, reopened.get(claim.chunkX(), claim.chunkZ()).orElseThrow());
+            }
+        } finally {
+            control.release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void partialGatherFailureRollsBackWholeBatchBeforePublication() throws Exception {
+        Path root = temporaryFolder.newFolder().toPath();
+        SavedBiomeStore store = SavedBiomeStore.open(root);
+        store.claimAndPersist(chunk(0, 3L));
+        Path region = root.resolve("iris/generation/biomes/r.0.0.ibio");
+        byte[] original = Files.readAllBytes(region);
+        BatchControl control = new BatchControl();
+        control.maximumWriteBytes = 11;
+        control.writeFailure = new IOException("Partial gathered append failed");
+        control.failingWrite = 2;
+        control.release.countDown();
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        List<SavedBiomeChunk> claims = List.of(chunk(1, 3L), chunk(2, 3L), chunk(3, 3L));
+        try {
+            for (Future<ClaimResult> result : enqueue(store, root, control, workers, claims)) {
+                ClaimResult completed = result.get(5, TimeUnit.SECONDS);
+                assertFalse(completed.persisted());
+                assertSame(control.writeFailure, completed.failure());
+            }
+            assertEquals(2, control.writes.get());
+            assertEquals(1, control.forces.get());
+            assertArrayEquals(original, Files.readAllBytes(region));
+            for (SavedBiomeChunk claim : claims) {
+                assertTrue(store.cached(claim.chunkX(), claim.chunkZ()).isEmpty());
+                assertTrue(store.claimAndPersist(claim));
+            }
+        } finally {
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void independentOriginRegionsPersistWhileOneRegionRemainsLocked() throws Exception {
+        Path root = temporaryFolder.newFolder().toPath();
+        SavedBiomeStore store = SavedBiomeStore.open(root);
+        Object lockedRegion = regionLock(store, 0, 0);
+        List<SavedBiomeChunk> independent = List.of(chunk(-1, -1, 3L), chunk(-1, 0, 3L), chunk(0, -1, 3L));
+        Set<Object> owners = Collections.newSetFromMap(new IdentityHashMap<>());
+        owners.add(lockedRegion);
+        for (SavedBiomeChunk chunk : independent) {
+            Object owner = regionLock(store, chunk.chunkX(), chunk.chunkZ());
+            assertTrue(owners.add(owner));
+            assertSame(owner, regionLock(store, chunk.chunkX() & ~31, chunk.chunkZ() & ~31));
+            assertSame(owner, regionLock(store, chunk.chunkX() | 31, chunk.chunkZ() | 31));
+        }
+        CountDownLatch started = new CountDownLatch(4);
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        List<Future<Boolean>> writes = new ArrayList<>();
+        Future<Boolean> sameRegion;
+        try {
+            synchronized (lockedRegion) {
+                for (SavedBiomeChunk chunk : independent) {
+                    writes.add(workers.submit(() -> {
+                        started.countDown();
+                        return store.claimAndPersist(chunk);
+                    }));
+                }
+                sameRegion = workers.submit(() -> {
+                    started.countDown();
+                    return store.claimAndPersist(chunk(31, 31, 3L));
+                });
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                for (Future<Boolean> write : writes) {
+                    assertTrue(write.get(5, TimeUnit.SECONDS));
+                }
+                assertFalse(sameRegion.isDone());
+                assertTrue(store.cached(31, 31).isEmpty());
+                assertSame(lockedRegion, regionLock(store, 31, 31));
+            }
+            assertTrue(sameRegion.get(5, TimeUnit.SECONDS));
+            SavedBiomeStore reopened = SavedBiomeStore.open(root);
+            for (SavedBiomeChunk chunk : independent) {
+                assertEquals(chunk, reopened.get(chunk.chunkX(), chunk.chunkZ()).orElseThrow());
+            }
+            assertEquals(chunk(31, 31, 3L), reopened.get(31, 31).orElseThrow());
+        } finally {
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void queuedClaimsShareOneAppendAndPublishAfterItCompletes() throws Exception {
+        Path root = temporaryFolder.newFolder().toPath();
+        SavedBiomeStore store = SavedBiomeStore.open(root);
+        store.claimAndPersist(chunk(0, 3L));
+        BatchControl control = new BatchControl();
+        ExecutorService workers = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<ClaimResult>> results = enqueue(store, root, control, workers,
+                    List.of(chunk(1, 3L), chunk(2, 3L), chunk(3, 3L), chunk(4, 3L),
+                            chunk(5, 3L), chunk(6, 3L), chunk(7, 3L), chunk(8, 3L)));
+            assertTrue(control.writing.await(5, TimeUnit.SECONDS));
+            for (int index = 1; index <= 8; index++) {
+                assertTrue(store.cached(index, 0).isEmpty());
+                assertFalse(results.get(index - 1).isDone());
+            }
+            control.release.countDown();
+            for (Future<ClaimResult> result : results) {
+                ClaimResult claim = result.get(5, TimeUnit.SECONDS);
+                assertNull(claim.failure);
+                assertTrue(claim.persisted);
+            }
+            assertEquals(1, control.writes.get());
+            assertEquals(0, control.forces.get());
+            SavedBiomeStore reopened = SavedBiomeStore.open(root);
+            for (int index = 1; index <= 8; index++) {
+                assertEquals(chunk(index, 3L), reopened.get(index, 0).orElseThrow());
+            }
+        } finally {
+            control.release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void batchWriteFailureRollsBackEveryNewClaimButPreservesExistingDuplicates() throws Exception {
+        Path root = temporaryFolder.newFolder().toPath();
+        SavedBiomeStore store = SavedBiomeStore.open(root);
+        store.claimAndPersist(chunk(0, 3L));
+        Path region = root.resolve("iris/generation/biomes/r.0.0.ibio");
+        byte[] original = Files.readAllBytes(region);
+        BatchControl control = new BatchControl();
+        control.writeFailure = new IOException("Batch write failed");
+        control.failingWrite = 1;
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        try {
+            List<Future<ClaimResult>> results = enqueue(store, root, control, workers,
+                    List.of(chunk(0, 3L), chunk(1, 3L), chunk(1, 3L), chunk(2, 3L)));
+            assertTrue(control.writing.await(5, TimeUnit.SECONDS));
+            control.release.countDown();
+            ClaimResult existing = results.getFirst().get(5, TimeUnit.SECONDS);
+            assertFalse(existing.persisted);
+            assertNull(existing.failure);
+            for (int index = 1; index < results.size(); index++) {
+                ClaimResult result = results.get(index).get(5, TimeUnit.SECONDS);
+                assertFalse(result.persisted);
+                assertSame(control.writeFailure, result.failure);
+            }
+            assertEquals(1, control.forces.get());
+            assertArrayEquals(original, Files.readAllBytes(region));
+            assertTrue(store.cached(1, 0).isEmpty());
+            assertTrue(store.claimAndPersist(chunk(1, 3L)));
+            assertTrue(SavedBiomeStore.open(root).get(2, 0).isEmpty());
+        } finally {
+            control.release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void queuedDuplicateAndConflictingClaimsHaveOneWinner() throws Exception {
+        Path root = temporaryFolder.newFolder().toPath();
+        SavedBiomeStore store = SavedBiomeStore.open(root);
+        store.claimAndPersist(chunk(0, 3L));
+        BatchControl control = new BatchControl();
+        ExecutorService workers = Executors.newFixedThreadPool(3);
+        try {
+            List<Future<ClaimResult>> results = enqueue(store, root, control, workers,
+                    List.of(chunk(1, 3L), chunk(1, 3L), chunk(1, 4L)));
+            assertTrue(control.writing.await(5, TimeUnit.SECONDS));
+            control.release.countDown();
+            int winners = 0;
+            SavedBiomeChunk actual = null;
+            for (int index = 0; index < results.size(); index++) {
+                ClaimResult result = results.get(index).get(5, TimeUnit.SECONDS);
+                if (result.persisted) {
+                    winners++;
+                    actual = chunk(1, index == 2 ? 4L : 3L);
+                }
+            }
+            assertEquals(1, winners);
+            assertEquals(1, control.writes.get());
+            assertEquals(0, control.forces.get());
+            assertEquals(actual, SavedBiomeStore.open(root).get(1, 0).orElseThrow());
+            for (int index = 0; index < results.size(); index++) {
+                ClaimResult result = results.get(index).get(5, TimeUnit.SECONDS);
+                assertEquals(index == 2 ? actual.activationId() != 4L : actual.activationId() != 3L,
+                        result.failure != null);
+            }
+        } finally {
+            control.release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void uncheckedBatchFailureSettlesClaimsAndRejectsEvictedRetries() throws Exception {
+        Path root = temporaryFolder.newFolder().toPath();
+        SavedBiomeStore store = SavedBiomeStore.open(root);
+        store.claimAndPersist(chunk(0, 3L));
+        BatchControl control = new BatchControl();
+        control.uncheckedFailure = new IllegalStateException("Batch write failed unexpectedly");
+        control.failingWrite = 1;
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        try {
+            List<Future<ClaimResult>> results = enqueue(store, root, control, workers,
+                    List.of(chunk(1, 3L), chunk(2, 3L), chunk(3, 3L), chunk(4, 3L)));
+            assertTrue(control.writing.await(5, TimeUnit.SECONDS));
+            Object writingRegion = regionLock(store, 0, 0);
+            for (int region = 1; region <= 132; region++) {
+                if (regionLock(store, region << 5, 0) != writingRegion) {
+                    assertTrue(store.get(region << 5, 0).isEmpty());
+                }
+            }
+            control.release.countDown();
+            for (Future<ClaimResult> future : results) {
+                ClaimResult result = future.get(5, TimeUnit.SECONDS);
+                assertFalse(result.persisted);
+                assertSame(control.uncheckedFailure, rootCause(result.failure));
+            }
+            assertEquals(1, control.writes.get());
+            assertEquals(0, control.forces.get());
+            IOException retry = assertThrows(IOException.class, () -> store.claimAndPersist(chunk(1, 3L)));
+            assertSame(control.uncheckedFailure, rootCause(retry));
+            IOException read = assertThrows(IOException.class, () -> store.get(1, 0));
+            assertSame(control.uncheckedFailure, rootCause(read));
+        } finally {
+            control.release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    private static Throwable rootCause(Throwable failure) {
+        if (failure == null) {
+            return null;
+        }
+        Throwable cause = failure;
+        while (cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
+    }
+
+    private static List<Future<ClaimResult>> enqueue(SavedBiomeStore store, Path root, BatchControl control,
+                                                    ExecutorService workers, List<SavedBiomeChunk> chunks) throws Exception {
+        Object stripe = regionLock(store, 0, 0);
+        Field pendingField = stripe.getClass().getDeclaredField("pending");
+        pendingField.setAccessible(true);
+        Queue<?> pending = (Queue<?>) pendingField.get(stripe);
+        ArrayList<Future<ClaimResult>> results = new ArrayList<>(chunks.size());
+        int uncachedClaims = 0;
+        for (SavedBiomeChunk chunk : chunks) {
+            if (store.cached(chunk.chunkX(), chunk.chunkZ()).isEmpty()) {
+                uncachedClaims++;
+            }
+        }
+        int expectedQueuedClaims = uncachedClaims;
+        synchronized (stripe) {
+            for (SavedBiomeChunk chunk : chunks) {
+                results.add(workers.submit(() -> claim(store, root, control, chunk)));
+            }
+            Await.reached("uncached claims to queue before acquiring the region write lock", Duration.ofSeconds(5L),
+                    () -> pending.size() == expectedQueuedClaims);
+            assertEquals(expectedQueuedClaims, pending.size());
+        }
+        return results;
+    }
+
+    private static ClaimResult claim(SavedBiomeStore store, Path root, BatchControl control,
+                                     SavedBiomeChunk chunk) throws Exception {
+        try (RandomAccessFile actual = new RandomAccessFile(
+                root.resolve("iris/generation/biomes/r.0.0.ibio").toFile(), "rw")) {
+            FileChannel channel = mock(FileChannel.class, delegatesTo(actual.getChannel()));
+            doAnswer(invocation -> {
+                ByteBuffer[] records = invocation.getArgument(0);
+                int offset = invocation.getArgument(1);
+                int count = invocation.getArgument(2);
+                control.maximumGathered.accumulateAndGet(count, Math::max);
+                int write = control.writes.incrementAndGet();
+                if (write == 1) {
+                    control.writing.countDown();
+                    assertTrue(control.release.await(5, TimeUnit.SECONDS));
+                }
+                if (write == control.failingWrite && control.uncheckedFailure != null) {
+                    throw control.uncheckedFailure;
+                }
+                if (write == control.failingWrite && control.writeFailure != null) {
+                    throw control.writeFailure;
+                }
+                if (control.zeroFirstWrite && write == 1) {
+                    return 0L;
+                }
+                if (control.maximumWriteBytes <= 0) {
+                    return actual.getChannel().write(records, offset, count);
+                }
+                long written = 0L;
+                for (int index = offset; index < offset + count && written < control.maximumWriteBytes; index++) {
+                    ByteBuffer record = records[index];
+                    int previousLimit = record.limit();
+                    record.limit(record.position() + Math.min(record.remaining(), control.maximumWriteBytes - (int) written));
+                    try {
+                        written += actual.getChannel().write(record);
+                    } finally {
+                        record.limit(previousLimit);
+                    }
+                }
+                return written;
+            }).when(channel).write(any(ByteBuffer[].class), anyInt(), anyInt());
+            doAnswer(invocation -> {
+                control.forces.incrementAndGet();
+                actual.getChannel().force(true);
+                return null;
+            }).when(channel).force(true);
+            try (MockedConstruction<RandomAccessFile> ignored = mockConstruction(RandomAccessFile.class,
+                    withSettings().defaultAnswer(delegatesTo(actual)),
+                    (file, context) -> doReturn(channel).when(file).getChannel())) {
+                try {
+                    return new ClaimResult(store.claimAndPersist(chunk), null);
+                } catch (IOException | RuntimeException failure) {
+                    return new ClaimResult(false, failure);
+                }
+            }
+        }
+    }
+
+    private static SavedBiomeChunk chunk(int x, long activation) {
+        return chunk(x, 0, activation);
+    }
+
+    private static SavedBiomeChunk chunk(int x, int z, long activation) {
+        SavedBiomeChunk.Cell cell = new SavedBiomeChunk.Cell(activation, "biome", "region");
+        SavedBiomeChunk.Column column = new SavedBiomeChunk.Column(cell, cell,
+                List.of(new SavedBiomeChunk.Span(-64, 320, cell)));
+        SavedBiomeChunk.Builder builder = SavedBiomeChunk.builder(new SavedBiomeChunk.Header(x, z, activation, -64, 384));
+        for (int localZ = 0; localZ < 16; localZ++) {
+            for (int localX = 0; localX < 16; localX++) {
+                builder.column(localX, localZ, column);
+            }
+        }
+        return builder.build();
+    }
+
+    private static Object regionLock(SavedBiomeStore store, int x, int z) throws ReflectiveOperationException {
+        Method lock = SavedBiomeStore.class.getDeclaredMethod("regionLock", int.class, int.class);
+        lock.setAccessible(true);
+        return lock.invoke(store, x, z);
+    }
+
+    private static final class BatchControl {
+        private final CountDownLatch writing = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private final AtomicInteger forces = new AtomicInteger();
+        private int maximumWriteBytes;
+        private boolean zeroFirstWrite;
+        private int failingWrite;
+        private IOException writeFailure;
+        private final AtomicInteger writes = new AtomicInteger();
+        private final AtomicInteger maximumGathered = new AtomicInteger();
+        private RuntimeException uncheckedFailure;
+    }
+
+    private record ClaimResult(boolean persisted, Throwable failure) {
+    }
+}

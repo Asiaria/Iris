@@ -1,0 +1,371 @@
+/*
+ * Iris is a World Generator for Minecraft Servers
+ * Copyright (c) 2026 Arcane Arts (Volmit Software)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+import org.gradle.api.file.DeleteSpec
+import org.gradle.api.file.FileCopyDetails
+import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.file.FileTree
+import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+
+import javax.inject.Inject
+
+buildscript {
+    repositories {
+        mavenCentral()
+        maven { url = uri('https://jitpack.io') }
+    }
+    dependencies {
+        classpath('com.github.VolmitSoftware.VolmLib:packaging:master-SNAPSHOT')
+    }
+}
+
+plugins {
+    id 'java'
+    id 'net.fabricmc.fabric-loom' version '1.17.14'
+    alias(libs.plugins.shadow)
+}
+
+apply plugin: 'art.arcane.volmit-packaging'
+
+interface IrisFileOperations {
+    @Inject
+    FileSystemOperations getFileSystemOperations()
+}
+
+IrisFileOperations irisFileOperations = objects.newInstance(IrisFileOperations)
+
+apply from: file('../../gradle/modded-generation-build-revision.gradle')
+apply from: file('../../gradle/volmlib-stamp.gradle')
+
+Properties rootProperties = new Properties()
+file('../../gradle.properties').withInputStream { InputStream stream -> rootProperties.load(stream) }
+String irisVersion = providers.gradleProperty('irisVersion').getOrElse(rootProperties.getProperty('irisVersion', '4.3.2-26.2'))
+String minecraftVersion = providers.gradleProperty('minecraftVersion').getOrElse(rootProperties.getProperty('minecraftVersion', '26.3'))
+String fabricLoaderVersion = providers.gradleProperty('fabricLoaderVersion').getOrElse(rootProperties.getProperty('fabricLoaderVersion', '0.19.5'))
+Closure<String> irisArtifactName = { String platform, String targetVersion ->
+    return "Iris v${project.version} [${platform}] ${targetVersion}.jar"
+}
+
+group = 'art.arcane'
+version = irisVersion
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+ext.nativeSourceLoader = 'fabric'
+apply from: file('../../gradle/native-minecraft-sources.gradle')
+
+sourceSets {
+    main {
+        java {
+            srcDir '../modded-common/src/main/java'
+            srcDir '../client-common/src/main/java'
+        }
+        resources {
+            srcDir '../modded-common/src/main/resources'
+        }
+    }
+    test {
+        java {
+            srcDir '../modded-common/src/test/java'
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = 'FabricMC'
+        url = uri('https://maven.fabricmc.net/')
+    }
+    maven { url = uri('https://repo.codemc.org/repository/maven-public/') }
+    maven { url = uri('https://jitpack.io') }
+    maven { url = uri('https://hub.spigotmc.org/nexus/content/repositories/snapshots/') }
+}
+
+configurations {
+    bundle {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+    devBundle {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+}
+
+configurations.named('bundle').configure {
+    exclude(group: 'com.google.code.gson')
+    exclude(group: 'com.google.guava')
+    exclude(group: 'commons-io')
+    exclude(group: 'org.apache.commons', module: 'commons-lang3')
+    exclude(group: 'it.unimi.dsi', module: 'fastutil')
+    exclude(group: 'org.slf4j')
+    exclude(group: 'org.apache.logging.log4j')
+    exclude(group: 'de.crazydev22.slimjar.helper')
+    exclude(group: 'de.crazydev22.slimjar')
+    exclude(group: 'io.github.slimjar')
+}
+
+configurations.compileClasspath.extendsFrom(configurations.devBundle)
+configurations.runtimeClasspath.extendsFrom(configurations.devBundle)
+configurations.testCompileClasspath.extendsFrom(configurations.devBundle)
+configurations.testRuntimeClasspath.extendsFrom(configurations.devBundle)
+
+// Jar-in-jar payload: exactly the Fabric API modules declared below, nothing else. Kept
+// non-transitive so the bundled set matches the `jars` list in fabric.mod.json one-for-one — a
+// transitive pull (fabric-transitive-access-wideners-v1) used to land in META-INF/jars undeclared.
+configurations.create('jij') {
+    transitive = false
+}
+
+dependencies {
+    minecraft("com.mojang:minecraft:${minecraftVersion}")
+    implementation("net.fabricmc:fabric-loader:${fabricLoaderVersion}")
+    testImplementation('junit:junit:4.13.2')
+    testImplementation('org.mockito:mockito-core:5.23.0')
+    testImplementation(testFixtures('art.arcane:core'))
+    testImplementation(libs.spigot) {
+        transitive = false
+    }
+    // registrySync and resourceLoader are LOAD-BEARING despite zero imports anywhere in Iris:
+    //   fabric-registry-sync-v0   delays registry freeze past mod init, which is what lets
+    //                             IrisFabricBootstrap register the CHUNK_GENERATOR codec in
+    //                             onInitialize instead of crashing on a frozen registry.
+    //   fabric-resource-loader-v1 is what makes assets/irisworldgen/lang/*.json (and the keybind
+    //                             labels) resolve from a mod jar.
+    // Removing either one produces a boot crash / silent missing-translation regression, not a
+    // compile error. Do not prune them as unused.
+    List<Object> fabricApi = [
+        libs.fabricApi.base,
+        libs.fabricApi.registrySync,
+        libs.fabricApi.resourceLoader,
+        libs.fabricApi.lifecycleEvents,
+        libs.fabricApi.commandApi,
+        libs.fabricApi.eventsInteraction,
+        libs.fabricApi.networking,
+        libs.fabricApi.rendering,
+        libs.fabricApi.keyMapping,
+        libs.fabricApi.permission
+    ]
+    fabricApi.each { Object notation ->
+        add('jij', notation)
+        add('implementation', notation)
+    }
+    compileOnly('org.slf4j:slf4j-api:2.0.17')
+    compileOnly(libs.spigot) {
+        transitive = false
+    }
+    add('bundle', 'com.github.VolmitSoftware.VolmLib:volmlib-shared:master-SNAPSHOT') {
+        transitive = false
+    }
+    add('devBundle', 'com.github.VolmitSoftware.VolmLib:volmlib-shared:master-SNAPSHOT') {
+        transitive = false
+    }
+    add('bundle', libs.zip) {
+        transitive = false
+    }
+    add('devBundle', libs.zip) {
+        transitive = false
+    }
+
+    List<Object> shared = [
+        "art.arcane:core:${irisVersion}".toString(),
+        "art.arcane:spi:${irisVersion}".toString(),
+        libs.paralithic,
+        libs.asm,
+        libs.lru,
+        libs.caffeine,
+        'com.fulcrumgenomics:jlibdeflate:0.2.0',
+        libs.dom4j,
+        libs.jaxen
+    ]
+    shared.each { Object notation ->
+        add('bundle', notation)
+        add('devBundle', notation)
+    }
+}
+
+tasks.named('compileJava', JavaCompile).configure {
+    options.encoding = 'UTF-8'
+    options.release.set(25)
+}
+
+tasks.named('test').configure {
+}
+
+loom {
+    accessWidenerPath = art.arcane.volmit.packaging.NativeAccessRules.prepare(nativeSourceImplementation, "fabric", layout.buildDirectory.dir("native-access").get().asFile)
+    runs {
+        client {
+            runDir(providers.gradleProperty('irisClientRunDir').getOrElse('run'))
+            vmArg('-Xmx8G')
+        }
+        server {
+            runDir(providers.gradleProperty('irisServerRunDir').getOrElse('run'))
+            String parity = providers.gradleProperty('irisParity').getOrNull()
+            if (parity != null) {
+                property('iris.parity', parity)
+            }
+            String parityGolden = providers.gradleProperty('irisParityGolden').getOrNull()
+            if (parityGolden != null) {
+                property('iris.parity.golden', parityGolden)
+            }
+            String parityDeep = providers.gradleProperty('irisParityDeep').getOrNull()
+            if (parityDeep != null) {
+                property('iris.parity.deep', parityDeep)
+            }
+            String worldCheck = providers.gradleProperty('irisWorldCheck').getOrNull()
+            if (worldCheck != null) {
+                property('iris.worldcheck', worldCheck)
+            }
+            vmArg('-Xmx8G')
+            programArgs('nogui')
+        }
+    }
+}
+
+processResources {
+    inputs.property('version', irisVersion)
+    inputs.property('minecraftVersion', minecraftVersion)
+    filesMatching('fabric.mod.json') {
+        expand('version': irisVersion, 'minecraftVersion': minecraftVersion)
+    }
+}
+
+// META-INF/jars filenames are declared verbatim in the fabric.mod.json `jars[]` array, and Fabric
+// loader resolves them by that exact string. Map every bundled module to its declared filename
+// instead of stripping the version with a regex: a version containing a '-' silently defeats the
+// strip and leaves an undeclared nested jar (which loader then ignores) behind.
+Map<String, String> nestedFabricApiJars = [
+    'fabric-api-base'            : 'fabric-api-base.jar',
+    'fabric-registry-sync-v0'    : 'fabric-registry-sync-v0.jar',
+    'fabric-resource-loader-v1'  : 'fabric-resource-loader-v1.jar',
+    'fabric-lifecycle-events-v1' : 'fabric-lifecycle-events-v1.jar',
+    'fabric-command-api-v2'      : 'fabric-command-api-v2.jar',
+    'fabric-events-interaction-v0': 'fabric-events-interaction-v0.jar',
+    'fabric-networking-api-v1'   : 'fabric-networking-api-v1.jar',
+    'fabric-rendering-v1'        : 'fabric-rendering-v1.jar',
+    'fabric-key-mapping-api-v1'  : 'fabric-key-mapping-api-v1.jar',
+    'fabric-permission-api-v1'   : 'fabric-permission-api-v1.jar'
+]
+
+FileTree staleLoaderJars = fileTree(layout.buildDirectory.dir('libs')) {
+    include('Iris v* [Fabric] *.jar')
+    include('iris-fabric-*.jar')
+}
+File legacyLoaderJar = layout.buildDirectory.file("libs/Iris-${project.version}+mc${minecraftVersion}-fabric.jar").get().asFile
+
+tasks.named('shadowJar', ShadowJar).configure {
+    doFirst {
+        irisFileOperations.fileSystemOperations.delete { DeleteSpec spec ->
+            spec.delete(staleLoaderJars, legacyLoaderJar)
+        }
+    }
+    from(tasks.named('generateVolmLibStamp')) {
+        into('META-INF/volmit')
+    }
+    archiveFileName.set(irisArtifactName('Fabric', "${minecraftVersion}+${fabricLoaderVersion}"))
+    configurations = [project.configurations.named('bundle').get()]
+    mergeServiceFiles()
+    exclude('META-INF/maven/**')
+    exclude('META-INF/proguard/**')
+    exclude('META-INF/*.SF')
+    exclude('META-INF/*.DSA')
+    exclude('META-INF/*.RSA')
+    // The only multi-release entry any bundled dependency contributes is an OSGi manifest. Keeping
+    // it forces `Multi-Release: true` onto the mod jar, which makes the loaders treat the whole
+    // archive as versioned and re-scan it per release directory for nothing.
+    exclude('META-INF/versions/**')
+    addMultiReleaseAttribute.set(false)
+    exclude('art/arcane/volmlib/util/localization/BukkitLanguageSwitcher*.class')
+    exclude('art/arcane/volmlib/util/localization/BukkitLanguageEditor*.class')
+    exclude('art/arcane/volmlib/util/localization/BukkitVolmitCommand*.class')
+    // Invalid package name on Java 9+ ('enum' is a keyword); a module-path scan chokes on it.
+    exclude('org/apache/commons/lang/enum/**')
+    // Compile-only annotation carriers. Shipping them duplicates packages other mods also ship.
+    exclude('org/jspecify/**')
+    exclude('com/google/errorprone/**')
+    exclude('com/google/j2objc/**')
+    exclude('org/checkerframework/**')
+    exclude('org/jetbrains/annotations/**')
+    exclude('org/intellij/lang/**')
+    // The Bukkit platform binding cannot load without org.bukkit on the classpath, which no mod
+    // loader has. Shipping it only adds dead classes that reference a missing package.
+    exclude('art/arcane/iris/platform/bukkit/**')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    filesMatching('META-INF/services/**') { FileCopyDetails entry ->
+        entry.duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    }
+    relocate('org.objectweb.asm', 'art.arcane.iris.shadow.asm')
+    // Split-package guard. A co-installed mod that ships any of these at their original coordinates
+    // puts two copies of the same package on one module layer, which the loaders reject at boot
+    // (Terra ships paralithic; caffeine and dom4j are common in mod dependency trees). First-party
+    // art.arcane.volmlib is deliberately NOT relocated.
+    relocate('com.github.benmanes.caffeine', 'art.arcane.iris.shadow.caffeine')
+    relocate('com.googlecode.concurrentlinkedhashmap', 'art.arcane.iris.shadow.clhm')
+    relocate('com.dfsek.paralithic', 'art.arcane.iris.shadow.paralithic')
+    relocate('org.dom4j', 'art.arcane.iris.shadow.dom4j')
+    relocate('org.jaxen', 'art.arcane.iris.shadow.jaxen')
+    relocate('org.zeroturnaround.zip', 'art.arcane.iris.shadow.ztzip')
+    from(project.configurations.named('jij')) {
+        into('META-INF/jars')
+        rename { String fileName ->
+            String module = nestedFabricApiJars.keySet()
+                .sort { String key -> -key.length() }
+                .find { String key -> fileName.startsWith(key + '-') }
+            if (module == null) {
+                throw new GradleException("Undeclared Fabric API nested jar: ${fileName}. Add it to "
+                    + 'nestedFabricApiJars and to the jars[] array in fabric.mod.json.')
+            }
+
+            return nestedFabricApiJars.get(module)
+        }
+    }
+}
+
+// The thin `jar`/`remapJar` outputs carry valid fabric.mod.json metadata but bundle zero
+// dependencies. Installing one is an instant NoClassDefFoundError, and they sit in build/libs right
+// next to the real artifact. shadowJar is the only shippable Fabric jar.
+tasks.named('jar').configure {
+    enabled = false
+}
+
+tasks.matching { it.name == 'remapJar' }.configureEach {
+    enabled = false
+}
+
+tasks.named('assemble').configure {
+    dependsOn(tasks.named('shadowJar'))
+}
+
+pluginPackaging {
+    artifacts {
+        create('distribution') {
+            taskName = 'shadowJar'
+            policyName = 'Iris Fabric'
+            prunePrefixes = ['art/arcane/volmlib/']
+            keepPrefixes = ['art/arcane/volmlib/util/matter/slices/']
+        }
+    }
+}

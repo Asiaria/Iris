@@ -1,0 +1,59 @@
+String apiVersion = providers.gradleProperty('apiVersion').get()
+def mainClass = 'art.arcane.iris.Iris'
+def bootstrapperClass = 'art.arcane.iris.IrisBootstrap'
+
+dependencies {
+    compileOnly(project(':core'))
+    compileOnly(libs.lombok)
+    annotationProcessor(libs.lombok)
+    compileOnly('com.github.VolmitSoftware.VolmLib:volmlib-shared:master-SNAPSHOT') {
+        transitive = false
+    }
+    compileOnly(libs.paper.api)
+    // LogFilterSVC (constructed in Iris.enable's explicit service list) implements the
+    // log4j-core Filter interface, so its constructor reference needs the type resolvable.
+    compileOnly(libs.log4j.core)
+    testImplementation('junit:junit:4.13.2')
+    testImplementation('org.mockito:mockito-core:5.23.0')
+    testImplementation(libs.paper.api)
+    testImplementation(libs.bstats)
+    testImplementation(project(':core'))
+    testImplementation(testFixtures(project(':core')))
+    testImplementation('com.github.VolmitSoftware.VolmLib:volmlib-shared:master-SNAPSHOT') {
+        transitive = false
+    }
+    compileOnly(libs.placeholderApi)
+    testImplementation(libs.placeholderApi) {
+        transitive = false
+    }
+}
+
+tasks.named('processResources').configure {
+    def pluginProperties = [
+        name      : rootProject.name,
+        version   : rootProject.version,
+        apiVersion: apiVersion,
+        main      : mainClass,
+        bootstrapper: bootstrapperClass,
+    ]
+    inputs.properties(pluginProperties)
+    filesMatching(['**/paper-plugin.yml', '**/plugin.yml']) {
+        expand(pluginProperties)
+    }
+}
+
+tasks.named('compileJava', JavaCompile).configure {
+    // lombok.config decides how equals/hashCode/toString are generated (fields, never getters), so editing it
+    // changes this module's bytecode. Gradle does not know that on its own and would serve a stale up-to-date
+    // build until something else in the module changed.
+    inputs.file(rootProject.file('lombok.config'))
+        .withPropertyName('lombokConfig')
+        .withPathSensitivity(PathSensitivity.NONE)
+}
+
+tasks.named('jar', Jar).configure {
+    archiveBaseName.set('iris-bukkit-plugin')
+}
+
+tasks.named('test').configure {
+}

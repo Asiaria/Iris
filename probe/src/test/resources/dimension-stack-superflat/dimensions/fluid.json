@@ -1,0 +1,20 @@
+{
+  "name": "Fluid Superflat",
+  "version": 1,
+  "mode": { "type": "SUPERFLAT" },
+  "regions": ["fluid"],
+  "focusRegion": "fluid",
+  "focus": "fluid",
+  "landChance": 1,
+  "environment": "NORMAL",
+  "dimensionHeight": { "min": -32, "max": 32 },
+  "logicalHeight": 64,
+  "fluidHeight": -20,
+  "bedrock": false,
+  "rockPalette": {
+    "palette": [{ "block": "minecraft:purple_concrete" }]
+  },
+  "fluidPalette": {
+    "palette": [{ "block": "minecraft:water" }]
+  }
+}

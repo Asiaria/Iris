@@ -1,0 +1,473 @@
+/*
+ * Iris is a World Generator for Minecraft Bukkit Servers
+ * Copyright (c) 2026 Arcane Arts (Volmit Software)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package art.arcane.iris.platform.bukkit;
+
+import art.arcane.iris.integration.Identifier;
+import art.arcane.iris.platform.bukkit.nms.INMS;
+import art.arcane.volmlib.util.collection.Pair;
+import art.arcane.iris.integration.ExternalDataSVC;
+import art.arcane.iris.structure.object.IrisObjectRotation;
+import art.arcane.volmlib.nativelib.terrain.BlockStateKey;
+import art.arcane.volmlib.nativelib.terrain.NativeBlockState;
+import art.arcane.iris.generation.block.IrisCustomData;
+import art.arcane.iris.generation.geometry.IrisBlockVector;
+import art.arcane.volmlib.util.collection.KMap;
+import org.bukkit.Axis;
+import org.bukkit.Bukkit;
+import org.bukkit.Tag;
+import org.bukkit.block.BlockFace;
+import org.bukkit.block.data.BlockData;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Interned Bukkit adapter for a neutral block state backed by BlockData.
+ */
+public final class BukkitBlockState implements NativeBlockState {
+    private static final Map<String, BlockFace> CUSTOM_NAMED_FACES = Map.of(
+            "north", BlockFace.NORTH, "south", BlockFace.SOUTH,
+            "east", BlockFace.EAST, "west", BlockFace.WEST,
+            "up", BlockFace.UP, "down", BlockFace.DOWN);
+    private static final List<BlockFace> CUSTOM_ROTATION_FACES = List.of(
+            BlockFace.SOUTH, BlockFace.SOUTH_SOUTH_WEST, BlockFace.SOUTH_WEST, BlockFace.WEST_SOUTH_WEST,
+            BlockFace.WEST, BlockFace.WEST_NORTH_WEST, BlockFace.NORTH_WEST, BlockFace.NORTH_NORTH_WEST,
+            BlockFace.NORTH, BlockFace.NORTH_NORTH_EAST, BlockFace.NORTH_EAST, BlockFace.EAST_NORTH_EAST,
+            BlockFace.EAST, BlockFace.EAST_SOUTH_EAST, BlockFace.SOUTH_EAST, BlockFace.SOUTH_SOUTH_EAST);
+    private static final ConcurrentHashMap<String, BukkitBlockState> CACHE = new ConcurrentHashMap<>();
+    // Front cache keyed on the BlockData itself (CraftBlockData equals/hashCode delegate to
+    // the canonical NMS state): a hit skips getAsString(), which built the full property
+    // string on EVERY of() call — the dominant cost of the 99.9% hit case.
+    private static final ConcurrentHashMap<BlockData, BukkitBlockState> DATA_CACHE = new ConcurrentHashMap<>();
+    private static final byte UNKNOWN = 0;
+    private static final byte FALSE = 1;
+    private static final byte TRUE = 2;
+
+    private final BlockData data;
+    private final String key;
+    private final String namespace;
+    private String materialKey;
+    private byte air;
+    private byte solid;
+    private byte occluding;
+    private byte fluid;
+    private byte water;
+    private byte waterLogged;
+    private byte lit;
+    private byte updatable;
+    private byte foliage;
+    private byte treeBlock;
+    private byte foliagePlantable;
+    private byte decorant;
+    private byte storage;
+    private byte storageChest;
+    private byte ore;
+    private byte deepSlate;
+    private byte vineBlock;
+    private byte tileEntity;
+    private volatile ConcurrentHashMap<String, ConcurrentHashMap<String, NativeBlockState>> propertyVariants;
+
+    private BukkitBlockState(BlockData data, String key) {
+        this.data = data;
+        this.key = key;
+        this.namespace = BlockStateKey.namespace(key);
+    }
+
+    private static byte flag(boolean value) {
+        return value ? TRUE : FALSE;
+    }
+
+    public static BukkitBlockState of(BlockData data) {
+        if (data instanceof IrisCustomData custom) {
+            return new BukkitBlockState(data, custom.getCustom().toString());
+        }
+        BukkitBlockState fast = DATA_CACHE.get(data);
+        if (fast != null) {
+            return fast;
+        }
+        String key = data.getAsString();
+        BukkitBlockState state = CACHE.computeIfAbsent(key, (String k) -> new BukkitBlockState(data, k));
+        DATA_CACHE.putIfAbsent(data, state);
+        return state;
+    }
+
+    public static BlockData rotateCustomData(IrisObjectRotation objectRotation, IrisCustomData custom, int spinxx, int spinyy, int spinzz) {
+        Pair<Identifier, KMap<String, String>> parsed = ExternalDataSVC.parseState(custom.getCustom());
+        KMap<String, String> original = parsed.getB();
+        if (original.isEmpty()) {
+            return null;
+        }
+        KMap<String, String> rotated = new KMap<>(original);
+        int spinx = (int) (90D * Math.ceil(Math.abs((spinxx % 360D) / 90D)));
+        int spiny = (int) (90D * Math.ceil(Math.abs((spinyy % 360D) / 90D)));
+        int spinz = (int) (90D * Math.ceil(Math.abs((spinzz % 360D) / 90D)));
+        boolean oriented = false;
+        String facing = original.get("facing");
+        if (facing != null && CUSTOM_NAMED_FACES.containsKey(facing)) {
+            BlockFace face = objectRotation.getFace(rotateFace(objectRotation, CUSTOM_NAMED_FACES.get(facing), spinx, spiny, spinz));
+            rotated.put("facing", face.name().toLowerCase(Locale.ROOT));
+            oriented = true;
+        }
+        Axis axis = switch (original.getOrDefault("axis", "")) {
+            case "x" -> Axis.X;
+            case "y" -> Axis.Y;
+            case "z" -> Axis.Z;
+            default -> null;
+        };
+        if (axis != null) {
+            Axis result = objectRotation.getAxis(rotateFace(objectRotation, objectRotation.faceForAxis(axis), spinx, spiny, spinz));
+            rotated.put("axis", result.name().toLowerCase(Locale.ROOT));
+            oriented = true;
+        }
+        int rotation = rotationIndex(original.get("rotation"));
+        if (rotation >= 0) {
+            BlockFace face = objectRotation.getHexFace(rotateFace(objectRotation, CUSTOM_ROTATION_FACES.get(rotation), spinx, spiny, spinz));
+            int result = CUSTOM_ROTATION_FACES.indexOf(face);
+            if (result >= 0) {
+                rotated.put("rotation", Integer.toString(result));
+            }
+            oriented = true;
+        }
+        for (Map.Entry<String, BlockFace> entry : CUSTOM_NAMED_FACES.entrySet()) {
+            String value = original.get(entry.getKey());
+            if (value == null) {
+                continue;
+            }
+            String destination = objectRotation.getFace(rotateFace(objectRotation, entry.getValue(), spinx, spiny, spinz)).name().toLowerCase(Locale.ROOT);
+            if (original.containsKey(destination)) {
+                rotated.put(destination, value);
+            }
+            oriented = true;
+        }
+        if (!oriented) {
+            return null;
+        }
+        if (rotated.equals(original)) {
+            return custom;
+        }
+        BlockData resolved = BukkitBlockResolution.resolveOrNull(ExternalDataSVC.buildState(parsed.getA(), rotated).toString());
+        return resolved instanceof IrisCustomData ? resolved : custom;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof BukkitBlockState state)) {
+            return false;
+        }
+        return data.equals(state.data);
+    }
+
+    @Override
+    public int hashCode() {
+        return key.hashCode();
+    }
+
+    @Override
+    public String key() {
+        return key;
+    }
+
+    @Override
+    public String namespace() {
+        return namespace;
+    }
+
+    @Override
+    public String materialKey() {
+        String cached = materialKey;
+        if (cached == null) {
+            int bracket = key.indexOf('[');
+            cached = bracket < 0 ? key : key.substring(0, bracket);
+            materialKey = cached;
+        }
+        return cached;
+    }
+
+    @Override
+    public boolean isAir() {
+        byte cached = air;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isAir(data));
+            air = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isSolid() {
+        byte cached = solid;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isSolid(data));
+            solid = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isOccluding() {
+        byte cached = occluding;
+        if (cached == UNKNOWN) {
+            cached = flag(data.getMaterial().isOccluding());
+            occluding = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isCustom() {
+        return data instanceof IrisCustomData;
+    }
+
+    @Override
+    public String deferredPlacementKey() {
+        return data instanceof IrisCustomData custom ? custom.getCustom().toString() : null;
+    }
+
+    @Override
+    public Object placementHandle() {
+        return data instanceof IrisCustomData custom ? custom.getBase() : data;
+    }
+
+    @Override
+    public NativeBlockState placementBaseState() {
+        return data instanceof IrisCustomData custom ? of(custom.getBase()) : this;
+    }
+
+    @Override
+    public boolean isFluid() {
+        byte cached = fluid;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isFluid(data));
+            fluid = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isWater() {
+        byte cached = water;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isWater(data));
+            water = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isWaterLogged() {
+        byte cached = waterLogged;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isWaterLogged(data));
+            waterLogged = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isLit() {
+        byte cached = lit;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isLit(data));
+            lit = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isUpdatable() {
+        byte cached = updatable;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isUpdatable(data));
+            updatable = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isFoliage() {
+        byte cached = foliage;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isFoliage(data));
+            foliage = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isTreeBlock() {
+        byte cached = treeBlock;
+        if (cached == UNKNOWN) {
+            cached = flag(Tag.LOGS.isTagged(data.getMaterial()) || Tag.LEAVES.isTagged(data.getMaterial()));
+            treeBlock = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isFoliagePlantable() {
+        byte cached = foliagePlantable;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isFoliagePlantable(data));
+            foliagePlantable = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isDecorant() {
+        byte cached = decorant;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isDecorant(data));
+            decorant = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isStorage() {
+        byte cached = storage;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isStorage(data));
+            storage = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isStorageChest() {
+        byte cached = storageChest;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isStorageChest(data));
+            storageChest = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isOre() {
+        byte cached = ore;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isOre(data));
+            ore = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isDeepSlate() {
+        byte cached = deepSlate;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isDeepSlate(data));
+            deepSlate = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isVineBlock() {
+        byte cached = vineBlock;
+        if (cached == UNKNOWN) {
+            cached = flag(BukkitBlockResolution.isVineBlock(data));
+            vineBlock = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean canPlaceOnto(NativeBlockState onto) {
+        return BukkitBlockResolution.canPlaceOnto(data.getMaterial(), ((BlockData) onto.nativeHandle()).getMaterial());
+    }
+
+    @Override
+    public boolean matches(NativeBlockState state) {
+        return data.matches((BlockData) state.nativeHandle());
+    }
+
+    @Override
+    public boolean hasTileEntity() {
+        byte cached = tileEntity;
+        if (cached == UNKNOWN) {
+            cached = flag(INMS.get().hasTile(data.getMaterial()));
+            tileEntity = cached;
+        }
+        return cached == TRUE;
+    }
+
+    @Override
+    public boolean isAirOrFluid() {
+        return isAir() || isFluid();
+    }
+
+    @Override
+    public NativeBlockState withProperty(String name, String value) {
+        if (data instanceof IrisCustomData custom) {
+            if (ExternalDataSVC.parseState(custom.getCustom()).getB().containsKey(name)) {
+                String merged = BlockStateKey.withProperty(key, name, value);
+                BlockData resolved = BukkitBlockResolution.resolveOrNull(merged);
+                if (!(resolved instanceof IrisCustomData)) {
+                    throw new IllegalArgumentException("Cannot resolve custom block state " + merged);
+                }
+                return of(resolved);
+            }
+            // Re-attach the custom identity (as the proxy's own merge/clone cases do) after
+            // editing the base block, so auto-waterlogging cannot turn custom blocks into vanilla.
+            String merged = BlockStateKey.withProperty(custom.getBase().getAsString(), name, value);
+            BlockData resolved = Bukkit.createBlockData(merged);
+            return of(IrisCustomData.of(resolved, custom.getCustom()));
+        }
+        ConcurrentHashMap<String, ConcurrentHashMap<String, NativeBlockState>> variants = propertyVariants;
+        if (variants == null) {
+            variants = new ConcurrentHashMap<>(4);
+            propertyVariants = variants;
+        }
+        ConcurrentHashMap<String, NativeBlockState> values = variants.computeIfAbsent(name, (String ignored) -> new ConcurrentHashMap<>(4));
+        NativeBlockState variant = values.get(value);
+        if (variant == null) {
+            variant = of(Bukkit.createBlockData(BlockStateKey.withProperty(key, name, value)));
+            values.putIfAbsent(value, variant);
+        }
+        return variant;
+    }
+
+    @Override
+    public Object nativeHandle() {
+        return data;
+    }
+
+    private static IrisBlockVector rotateFace(IrisObjectRotation objectRotation, BlockFace face, int spinx, int spiny, int spinz) {
+        return objectRotation.rotate(new IrisBlockVector(face.getModX(), face.getModY(), face.getModZ()), spinx, spiny, spinz);
+    }
+
+    private static int rotationIndex(String value) {
+        if (value == null) {
+            return -1;
+        }
+        try {
+            int rotation = Integer.parseInt(value);
+            return rotation >= 0 && rotation < CUSTOM_ROTATION_FACES.size() ? rotation : -1;
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+}

@@ -10,4 +10,74 @@ libs/
 
 collection/
 
-/core/src/main/java/com/volmit/iris/util/uniques/
+out/
+tools/simd-bench/out/
+tools/simd-bench/simd-bench.jar
+
+DataPackExamples/
+
+TreeGenStuff/
+dist/
+core/plugins/
+adapters/bukkit/plugin/plugins/
+
+# Dev-run artifacts. `run/` is a loom/ForgeGradle/ModDevGradle working directory and `logs/` is
+# server output; neither is ever source. No source directory in this repo is named run or logs.
+run/
+logs/
+*.log
+*.log.gz
+crash-reports/
+hs_err_pid*.log
+replay_pid*.log
+
+.codegraph/
+
+plans/
+
+.env
+.env.*
+!.env.example
+local.properties
+*.jks
+*.p12
+*.pfx
+*.pem
+*.key
+*.hprof
+credentials.json
+service-account*.json
+
+# docs/ is hand-written and tracked (flat numbered product docs). Nothing under it is
+# generated, so there is nothing to ignore here.
+
+.qa/
+.repro/
+.perf/
+.release-gate/
+
+# Throwaway worktree copies used by the API / PlaceholderAPI rebuild lanes. Generated, never source.
+.apiwt/
+.papiwt/
+
+__pycache__/
+
+# Doc authoring scratch
+.docs-wip/
+
+AGENTS.md
+
+# Local build tooling, not part of the project
+build-lt.sh
+BUILDS/
+.run/
+
+# Version-content compat lane worktree. Generated, never source.
+.compatwt/
+
+.worktrees/
+
+/VolmLib/
+/docs/
+/.perf/
+/.codegraph/

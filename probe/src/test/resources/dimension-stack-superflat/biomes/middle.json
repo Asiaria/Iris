@@ -1,0 +1,19 @@
+{
+  "name": "Middle",
+  "derivative": "minecraft:desert",
+  "vanillaDerivative": "minecraft:desert",
+  "layers": [
+    {
+      "minHeight": 1,
+      "maxHeight": 1,
+      "palette": [{ "block": "minecraft:pink_wool" }]
+    }
+  ],
+  "generators": [
+    {
+      "generator": "flat",
+      "min": 15,
+      "max": 15
+    }
+  ]
+}

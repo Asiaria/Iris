@@ -1,7 +1,8 @@
-package com.volmit.iris;
+package art.arcane.iris;
 
 // The constants are replaced before compilation
 public interface BuildConstants {
     String ENVIRONMENT = "${environment}";
     String COMMIT = "${commit}";
+    String MINECRAFT_VERSION = "${minecraftVersion}";
 }

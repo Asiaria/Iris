@@ -1,0 +1,25 @@
+{
+  "name": "Blended Stacked Superflat",
+  "version": 1,
+  "mode": { "type": "SUPERFLAT" },
+  "regions": ["bottom"],
+  "focusRegion": "bottom",
+  "focus": "bottom",
+  "landChance": 1,
+  "environment": "NORMAL",
+  "dimensionHeight": { "min": -64, "max": 64 },
+  "logicalHeight": 128,
+  "fluidHeight": -64,
+  "bedrock": false,
+  "rockPalette": {
+    "palette": [{ "block": "minecraft:blue_concrete" }]
+  },
+  "dimensionStack": {
+    "dimensions": ["top", "middle", "stack-blended"],
+    "spacer": 8,
+    "blend": {
+      "amplitude": 4,
+      "style": { "style": "SIMPLEX", "zoom": 4 }
+    }
+  }
+}

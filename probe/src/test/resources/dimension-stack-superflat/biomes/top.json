@@ -1,0 +1,19 @@
+{
+  "name": "Top",
+  "derivative": "minecraft:forest",
+  "vanillaDerivative": "minecraft:forest",
+  "layers": [
+    {
+      "minHeight": 1,
+      "maxHeight": 1,
+      "palette": [{ "block": "minecraft:lime_wool" }]
+    }
+  ],
+  "generators": [
+    {
+      "generator": "flat",
+      "min": 15,
+      "max": 15
+    }
+  ]
+}

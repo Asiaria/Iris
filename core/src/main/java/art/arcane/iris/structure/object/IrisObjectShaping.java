@@ -1,0 +1,304 @@
+/*
+ * Iris is a World Generator for Minecraft Bukkit Servers
+ * Copyright (c) 2022 Arcane Arts (Volmit Software)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package art.arcane.iris.structure.object;
+
+import art.arcane.iris.generation.block.TileData;
+import art.arcane.iris.generation.decoration.IrisProceduralBlocks;
+
+import art.arcane.iris.spi.IrisLogging;
+import art.arcane.volmlib.nativelib.terrain.NativeBlockState;
+import art.arcane.iris.generation.block.VectorMap;
+import art.arcane.iris.generation.geometry.IrisBlockVector;
+import art.arcane.volmlib.util.math.Vector3i;
+import art.arcane.volmlib.util.format.Form;
+import art.arcane.volmlib.util.scheduling.PrecisionStopwatch;
+
+import java.util.Set;
+
+/**
+ * Volume shaping for {@link IrisObject}: smart boring, shrinkwrapping, compaction and the shared block
+ * classification helpers used by placement.
+ */
+final class IrisObjectShaping {
+    private IrisObjectShaping() {
+    }
+
+    static IrisObject smartBoredVariant(IrisObject self) {
+        SmartBoreVariant cached = self.smartBoreVariant;
+        if (cached != null && cached.matches(self)) {
+            return cached.object();
+        }
+        self.writeLock.lock();
+        try {
+            cached = self.smartBoreVariant;
+            if (cached != null && cached.matches(self)) {
+                return cached.object();
+            }
+            IrisObject variant = self.copy();
+            ensureSmartBored(variant);
+            self.smartBoreVariant = new SmartBoreVariant(self.blocks, self.states,
+                    self.blocks.modificationRevision(), self.states.modificationRevision(),
+                    self.w, self.h, self.d, self.center.getX(), self.center.getY(), self.center.getZ(), variant);
+            return variant;
+        } finally {
+            self.writeLock.unlock();
+        }
+    }
+
+    record SmartBoreVariant(VectorMap<NativeBlockState> blocks, VectorMap<TileData> states,
+                            long blockRevision, long stateRevision, int width, int height, int depth,
+                            int centerX, int centerY, int centerZ, IrisObject object) {
+        boolean matches(IrisObject source) {
+            return blocks == source.blocks && states == source.states
+                    && blockRevision == source.blocks.modificationRevision()
+                    && stateRevision == source.states.modificationRevision()
+                    && width == source.w && height == source.h && depth == source.d
+                    && centerX == source.center.getX() && centerY == source.center.getY()
+                    && centerZ == source.center.getZ();
+        }
+    }
+
+    static void ensureSmartBored(IrisObject self) {
+        if (self.smartBored) {
+            return;
+        }
+
+        // Whole computation under the object's write lock: two racing callers would otherwise
+        // both compute, with the loser reading self.blocks while the winner merges into it.
+        self.writeLock.lock();
+        try {
+            if (self.smartBored) {
+                return;
+            }
+            ensureSmartBoredLocked(self);
+        } finally {
+            self.writeLock.unlock();
+        }
+    }
+
+    private static void ensureSmartBoredLocked(IrisObject self) {
+        PrecisionStopwatch p = PrecisionStopwatch.start();
+        NativeBlockState vair = IrisObject.States.vair();
+        int applied = 0;
+        IrisBlockVector max = new IrisBlockVector(Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE);
+        IrisBlockVector min = new IrisBlockVector(Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
+        VectorMap<NativeBlockState> source = self.blocks;
+        if (source.isEmpty()) {
+            IrisLogging.warn("Cannot Smart Bore " + self.getLoadKey() + " because it has 0 blocks in it.");
+            self.smartBored = true;
+            return;
+        }
+
+        for (IrisBlockVector i : source.keys()) {
+            max.setX(Math.max(i.getX(), max.getX()));
+            min.setX(Math.min(i.getX(), min.getX()));
+            max.setY(Math.max(i.getY(), max.getY()));
+            min.setY(Math.min(i.getY(), min.getY()));
+            max.setZ(Math.max(i.getZ(), max.getZ()));
+            min.setZ(Math.min(i.getZ(), min.getZ()));
+        }
+
+        VectorMap<NativeBlockState> bore = new VectorMap<>();
+        // Inline on purpose: the three axis passes read AND write the shared bore map, so the
+        // bored volume must come from a fixed X->Y->Z order on the calling (lock-owning)
+        // thread, not from pool scheduling. This matches what burst-worker callers (studio,
+        // generation threads) already produced, so output is unchanged where it was stable.
+
+        // Smash X
+        for (int rayY = min.getBlockY(); rayY <= max.getBlockY(); rayY++) {
+            for (int rayZ = min.getBlockZ(); rayZ <= max.getBlockZ(); rayZ++) {
+                int start = Integer.MAX_VALUE;
+                int end = Integer.MIN_VALUE;
+
+                for (int ray = min.getBlockX(); ray <= max.getBlockX(); ray++) {
+                    if (boreContains(source, bore, new IrisBlockVector(ray, rayY, rayZ))) {
+                        start = Math.min(ray, start);
+                        end = Math.max(ray, end);
+                    }
+                }
+
+                if (start != Integer.MAX_VALUE && end != Integer.MIN_VALUE) {
+                    for (int i = start; i <= end; i++) {
+                        applied += boreCell(source, bore, new IrisBlockVector(i, rayY, rayZ), vair);
+                    }
+                }
+            }
+        }
+
+        // Smash Y
+        for (int rayX = min.getBlockX(); rayX <= max.getBlockX(); rayX++) {
+            for (int rayZ = min.getBlockZ(); rayZ <= max.getBlockZ(); rayZ++) {
+                int start = Integer.MAX_VALUE;
+                int end = Integer.MIN_VALUE;
+
+                for (int ray = min.getBlockY(); ray <= max.getBlockY(); ray++) {
+                    if (boreContains(source, bore, new IrisBlockVector(rayX, ray, rayZ))) {
+                        start = Math.min(ray, start);
+                        end = Math.max(ray, end);
+                    }
+                }
+
+                if (start != Integer.MAX_VALUE && end != Integer.MIN_VALUE) {
+                    for (int i = start; i <= end; i++) {
+                        applied += boreCell(source, bore, new IrisBlockVector(rayX, i, rayZ), vair);
+                    }
+                }
+            }
+        }
+
+        // Smash Z
+        for (int rayX = min.getBlockX(); rayX <= max.getBlockX(); rayX++) {
+            for (int rayY = min.getBlockY(); rayY <= max.getBlockY(); rayY++) {
+                int start = Integer.MAX_VALUE;
+                int end = Integer.MIN_VALUE;
+
+                for (int ray = min.getBlockZ(); ray <= max.getBlockZ(); ray++) {
+                    if (boreContains(source, bore, new IrisBlockVector(rayX, rayY, ray))) {
+                        start = Math.min(ray, start);
+                        end = Math.max(ray, end);
+                    }
+                }
+
+                if (start != Integer.MAX_VALUE && end != Integer.MIN_VALUE) {
+                    for (int i = start; i <= end; i++) {
+                        applied += boreCell(source, bore, new IrisBlockVector(rayX, rayY, i), vair);
+                    }
+                }
+            }
+        }
+
+        source.putAll(bore);
+        self.smartBored = true;
+
+        IrisLogging.debug("Smart Bore: " + self.getLoadKey() + " in " + Form.duration(p.getMilliseconds(), 2) + " (" + Form.f(applied) + ")");
+    }
+
+    private static boolean boreContains(VectorMap<NativeBlockState> source, VectorMap<NativeBlockState> bore, IrisBlockVector v) {
+        return source.containsKey(v) || bore.containsKey(v);
+    }
+
+    private static int boreCell(VectorMap<NativeBlockState> source, VectorMap<NativeBlockState> bore, IrisBlockVector v, NativeBlockState vair) {
+        NativeBlockState existing = source.get(v);
+
+        if (existing == null) {
+            if (vair.equals(bore.get(v))) {
+                return 0;
+            }
+
+            bore.put(v, vair);
+        } else if (vair.equals(existing)) {
+            return 0;
+        }
+
+        return 1;
+    }
+
+    static void shrinkwrap(IrisObject self) {
+        if (self.blocks.isEmpty()) return;
+        IrisBlockVector min = new IrisBlockVector(Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
+        IrisBlockVector max = new IrisBlockVector(Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE);
+
+        for (IrisBlockVector i : self.blocks.keys()) {
+            min.setX(Math.min(min.getX(), i.getX()));
+            min.setY(Math.min(min.getY(), i.getY()));
+            min.setZ(Math.min(min.getZ(), i.getZ()));
+            max.setX(Math.max(max.getX(), i.getX()));
+            max.setY(Math.max(max.getY(), i.getY()));
+            max.setZ(Math.max(max.getZ(), i.getZ()));
+        }
+
+        // Compute into locals and assign every field in one block at the end, so a reader can
+        // never observe post-shrink dimensions paired with pre-shrink volume (or vice versa).
+        int w = max.getBlockX() - min.getBlockX() + 1;
+        int h = max.getBlockY() - min.getBlockY() + 1;
+        int d = max.getBlockZ() - min.getBlockZ() + 1;
+        Vector3i center = new Vector3i(w / 2, h / 2, d / 2);
+
+        Vector3i offset = new Vector3i(
+                -center.getBlockX() - min.getBlockX(),
+                -center.getBlockY() - min.getBlockY(),
+                -center.getBlockZ() - min.getBlockZ()
+        );
+        if (offset.getBlockX() == 0 && offset.getBlockY() == 0 && offset.getBlockZ() == 0) {
+            self.w = w;
+            self.h = h;
+            self.d = d;
+            self.center = center;
+            return;
+        }
+
+        VectorMap<NativeBlockState> b = new VectorMap<>();
+        VectorMap<TileData> s = new VectorMap<>();
+        IrisBlockVector shift = new IrisBlockVector(offset.getX(), offset.getY(), offset.getZ());
+
+        self.blocks.forEach((vector, data) -> {
+            vector.add(shift);
+            b.put(vector, data);
+        });
+
+        self.states.forEach((vector, data) -> {
+            vector.add(shift);
+            s.put(vector, data);
+        });
+
+        self.w = w;
+        self.h = h;
+        self.d = d;
+        self.center = center;
+        self.shrinkOffset = offset;
+        self.blocks = b;
+        self.states = s;
+        self.surfaceSupportOffsets.reset();
+        self.floatingFootprint.reset();
+    }
+
+    static void clean(IrisObject self) {
+        VectorMap<NativeBlockState> d = new VectorMap<>();
+        d.putAll(self.blocks);
+
+        VectorMap<TileData> dx = new VectorMap<>();
+        dx.putAll(self.states);
+
+        self.blocks = d;
+        self.states = dx;
+        self.surfaceSupportOffsets.reset();
+        self.floatingFootprint.reset();
+    }
+
+    static boolean isStiltLayerBlock(NativeBlockState state) {
+        String material = materialKey(state);
+        if (!state.isOccluding() && !material.equals("minecraft:ice") && !material.equals("minecraft:glass")
+                && !material.equals("minecraft:tinted_glass") && !material.endsWith("_stained_glass")) {
+            return false;
+        }
+        if (material.endsWith("_stairs") || material.endsWith("_slab")) {
+            return false;
+        }
+        return !material.equals("minecraft:dirt_path");
+    }
+
+    static boolean shouldStilt(NativeBlockState state, Set<String> excludedMaterials) {
+        return isStiltLayerBlock(state) && !state.isStorage() && !state.hasTileEntity()
+                && !excludedMaterials.contains(materialKey(state));
+    }
+
+    static String materialKey(NativeBlockState state) {
+        return IrisProceduralBlocks.materialKey(state);
+    }
+}

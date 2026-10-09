@@ -1,0 +1,90 @@
+name: ${name}
+version: ${version}
+main: ${main}
+bootstrapper: ${bootstrapper}
+loader: art.arcane.iris.IrisPluginLoader
+folia-supported: true
+api-version: '${apiVersion}'
+load: STARTUP
+authors: [ cyberpwn, NextdoorPsycho, Vatuu ]
+website: VolmitSoftware.com
+description: More than a Dimension!
+permissions:
+  iris.debugdump:
+    description: Allows creating and optionally uploading diagnostic reports.
+    default: op
+  iris.language.self:
+    description: Allows choosing your own language for this plugin.
+    default: true
+  iris.all:
+    description: Allows use of the full /iris command tree (worlds, studio, pregen, packs, developer tools).
+    default: op
+  iris.treefeller:
+    description: Allows survival players to fell Iris-managed trees with an axe.
+    default: op
+dependencies:
+  server:
+    PlaceholderAPI:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    CraftEngine:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    Nexo:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    Oraxen:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    ItemsAdder:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    SCore:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    ExecutableItems:
+      load: BEFORE
+      required: false
+      join-classpath: false
+    MythicLib:
+      load: OMIT
+      required: false
+      join-classpath: true
+    MMOItems:
+      load: OMIT
+      required: false
+      join-classpath: true
+    eco:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    EcoItems:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    MythicMobs:
+      load: OMIT
+      required: false
+      join-classpath: true
+    MythicCrucible:
+      load: OMIT
+      required: false
+      join-classpath: true
+    KGenerators:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    Multiverse-Core:
+      load: AFTER
+      required: false
+      join-classpath: true
+    WorldEdit:
+      load: BEFORE
+      required: false
+      join-classpath: true

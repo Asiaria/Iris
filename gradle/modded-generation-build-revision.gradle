@@ -1,0 +1,51 @@
+import org.gradle.api.artifacts.ResolvedArtifact
+import org.gradle.api.initialization.IncludedBuild
+import org.gradle.api.tasks.TaskReference
+import org.gradle.api.tasks.TaskProvider
+import org.gradle.jvm.tasks.Jar
+
+IncludedBuild coreBuild = gradle.includedBuilds.find { IncludedBuild candidate ->
+    candidate.projectDir.canonicalFile == file('../..').canonicalFile
+}
+if (coreBuild == null) {
+    throw new GradleException('The modded artifact requires the included Iris core build and its generation build revision.')
+}
+TaskReference buildRevisionVerification = coreBuild.task(':core:verifyGenerationBuildRevision')
+TaskProvider<JavaExec> resolvedRevisionVerification = tasks.register('verifyResolvedGenerationKernelDependencies', JavaExec) {
+    group = 'verification'
+    description = 'Checks the actual bundled generation library contents against the current build revision.'
+    dependsOn(buildRevisionVerification)
+    classpath = files('../../buildSrc/build/libs/buildSrc.jar')
+    mainClass.set('art.arcane.iris.buildtools.GenerationBuildRevision')
+    doFirst {
+        List<String> arguments = ['verify-dependencies', file('../../core/build/generated/generation-revision/META-INF/iris/generation-kernels/abi-1.revision').absolutePath]
+        for (ResolvedArtifact artifact : configurations.bundle.resolvedConfiguration.resolvedArtifacts) {
+            String group = artifact.moduleVersion.id.group
+            String name = artifact.moduleVersion.id.name
+            if (group == 'art.arcane' && name in ['core', 'spi']) {
+                continue
+            }
+            if ("${group}:${name}".toString() in [
+                    'org.jetbrains:annotations', 'org.jspecify:jspecify',
+                    'com.google.errorprone:error_prone_annotations', 'com.google.j2objc:j2objc-annotations',
+                    'org.checkerframework:checker-qual']) {
+                continue
+            }
+            boolean volmLib = (group == 'com.github.VolmitSoftware' && name == 'VolmLib')
+                || (group == 'com.github.VolmitSoftware.VolmLib' && name in ['shared', 'volmlib-shared'])
+                || (group == 'art.arcane' && name == 'shared')
+            String key = volmLib ? 'volmlib' : "${group}:${name}".toString()
+            if (artifact.classifier != null) {
+                key += ':' + artifact.classifier
+            }
+            arguments.add(key)
+            arguments.add(artifact.file.absolutePath)
+        }
+        setArgs(arguments)
+    }
+}
+gradle.projectsEvaluated {
+    resolvedRevisionVerification.configure { dependsOn(configurations.bundle) }
+}
+tasks.withType(Jar).configureEach { dependsOn(resolvedRevisionVerification) }
+tasks.named('check').configure { dependsOn(resolvedRevisionVerification) }

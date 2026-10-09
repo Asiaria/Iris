@@ -1,0 +1,46 @@
+Configuration nativeMinecraftSources = configurations.create('nativeMinecraftSources') {
+    canBeConsumed = false
+    canBeResolved = true
+}
+
+String nativeSourceLoader = extensions.extraProperties.get('nativeSourceLoader')
+String nativeSourceImplementation = 'minecraft26_2'
+String nativeSourceMinecraftVersion = providers.gradleProperty('minecraftVersion').getOrElse('26.3')
+extensions.extraProperties.set('nativeSourceImplementation', nativeSourceImplementation)
+dependencies.add(nativeMinecraftSources.name,
+    "com.github.VolmitSoftware.VolmLib:native-${nativeSourceImplementation}-sources:master-SNAPSHOT")
+
+TaskProvider<Sync> unpackNativeMinecraftSources = tasks.register('unpackNativeMinecraftSources', Sync) {
+    dependsOn(nativeMinecraftSources)
+    from(provider { nativeMinecraftSources.collect { File artifact -> zipTree(artifact) } }) {
+        include('art/**', 'modded/**', "${nativeSourceLoader}/**",
+            'resources/modded/**', "resources/${nativeSourceLoader}/**", "versions/${nativeSourceMinecraftVersion}/**")
+        eachFile { FileCopyDetails source ->
+            String versionPrefix = "versions/${nativeSourceMinecraftVersion}/"
+            if (source.path.startsWith(versionPrefix)) {
+                source.path = source.path.substring(versionPrefix.length())
+            }
+        }
+    }
+    into(layout.buildDirectory.dir('generated/sources/native-minecraft'))
+}
+
+sourceSets.main.java.srcDir(unpackNativeMinecraftSources)
+
+sourceSets.main.resources.srcDir(layout.buildDirectory.dir('generated/sources/native-minecraft/resources/modded'))
+sourceSets.main.resources.srcDir(layout.buildDirectory.dir("generated/sources/native-minecraft/resources/${nativeSourceLoader}"))
+tasks.named('processResources').configure {
+    dependsOn(unpackNativeMinecraftSources)
+}
+
+tasks.named('verifyLoggingPolicy').configure {
+    dependsOn(unpackNativeMinecraftSources)
+}
+
+tasks.named('verifyNativeClassBoundary').configure {
+    dependsOn(tasks.named('classes'))
+}
+
+tasks.matching { Task task -> task.name == 'createMinecraftArtifacts' }.configureEach {
+    dependsOn(unpackNativeMinecraftSources)
+}

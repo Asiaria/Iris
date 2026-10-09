@@ -1,0 +1,17 @@
+{
+  "name": "Top Superflat",
+  "version": 1,
+  "mode": { "type": "SUPERFLAT" },
+  "regions": ["middle"],
+  "focusRegion": "middle",
+  "focus": "top",
+  "landChance": 1,
+  "environment": "NORMAL",
+  "dimensionHeight": { "min": 0, "max": 64 },
+  "logicalHeight": 64,
+  "fluidHeight": 0,
+  "bedrock": false,
+  "rockPalette": {
+    "palette": [{ "block": "minecraft:green_concrete" }]
+  }
+}
