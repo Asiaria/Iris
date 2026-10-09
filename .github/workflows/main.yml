@@ -25,10 +25,8 @@ jobs:
       - name: Configure Git User Details
         run: git config --global user.email "actions@github.com" && git config --global user.name "Github Actions"
 
-      - name: Build
-        run: ./gradlew buildAll
-      - name: Build2
-        run: ./gradlew buildAllToOut
+      - name: Build and Copy to Out
+        run: ./gradlew buildAll buildAllToOut
       - uses: "actions/upload-artifact@v4"
         with:
           name: "IRIS"
