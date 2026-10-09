@@ -27,6 +27,7 @@ jobs:
 
       - name: Build
         run: ./gradlew buildAll
+      - name: Build2
         run: ./gradlew buildAllToOut
       - uses: "actions/upload-artifact@v4"
         with:
