@@ -31,11 +31,7 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name "Github Actions"
 
-      - name: Checkout VolmLib
-        uses: actions/checkout@v4
-        with:
-          repository: VolmitSoftware/VolmLib
-          path: ../VolmLib
+
 
       - name: Build and Copy to Out
         run: ./gradlew buildAll buildAllToOut
